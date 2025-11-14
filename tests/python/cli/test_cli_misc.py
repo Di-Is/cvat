@@ -3,16 +3,20 @@
 # SPDX-License-Identifier: MIT
 
 import json
+import logging
 import os
 from datetime import timedelta
 from io import BytesIO
+from pathlib import Path
 from unittest import mock
 
 import packaging.version as pv
 import pytest
 from cvat_cli._internal.agent import _Event, _NewReconnectionDelay, _parse_event_stream
 from cvat_sdk import Client
+from cvat_sdk.api_client import ApiClient
 from cvat_sdk.api_client import models
+from cvat_sdk.exceptions import ApiException
 from cvat_sdk.core.proxies.tasks import ResourceType
 
 from .util import TestCliBase, generate_images, https_reverse_proxy, run_cli
@@ -160,6 +164,52 @@ class TestCliMisc(TestCliBase):
 
         mock_auth_factory.assert_called_once()
         mock_getpass.assert_not_called()
+
+    def test_create_native_reports_missing_functions_api(self, monkeypatch, caplog):
+        function_file = Path(__file__).with_name("example_function.py")
+        original_call_api = ApiClient.call_api
+
+        def fake_call_api(self, resource_path, method, *args, **kwargs):
+            if resource_path == "/api/functions" and method == "POST":
+                raise ApiException(status=404)
+            return original_call_api(self, resource_path, method, *args, **kwargs)
+
+        monkeypatch.setattr(ApiClient, "call_api", fake_call_api)
+        caplog.set_level(logging.CRITICAL, logger="cvat_cli.__main__")
+
+        self.run_cli(
+            "function",
+            "create-native",
+            "sam2",
+            "--function-file",
+            str(function_file),
+            expected_code=1,
+        )
+
+        assert "Creating native functions requires the native functions API" in caplog.text
+
+    def test_run_agent_reports_missing_functions_api(self, monkeypatch, caplog):
+        function_file = Path(__file__).with_name("example_function.py")
+        original_call_api = ApiClient.call_api
+
+        def fake_call_api(self, resource_path, method, *args, **kwargs):
+            if resource_path.startswith("/api/functions/") and method == "GET":
+                raise ApiException(status=404)
+            return original_call_api(self, resource_path, method, *args, **kwargs)
+
+        monkeypatch.setattr(ApiClient, "call_api", fake_call_api)
+        caplog.set_level(logging.CRITICAL, logger="cvat_cli.__main__")
+
+        self.run_cli(
+            "function",
+            "run-agent",
+            "1",
+            "--function-file",
+            str(function_file),
+            expected_code=1,
+        )
+
+        assert "Running native function agents requires the native functions API" in caplog.text
 
 
 @pytest.mark.parametrize(

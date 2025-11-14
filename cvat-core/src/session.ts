@@ -499,6 +499,17 @@ export class Session {
 
 type InitializerType = Readonly<Partial<Omit<SerializedJob, 'labels'> & { labels?: SerializedLabel[] }>>;
 
+export interface FunctionTrackerRunParams {
+    frame: number;
+    targetFrame: number;
+    trackIds: number[];
+}
+
+export interface FunctionTrackerRunResult {
+    runId: string;
+    initialRequestId: string;
+}
+
 export class Job extends Session {
     #data: {
         id?: number;
@@ -758,6 +769,19 @@ export class Job extends Session {
     async mergeConsensusJobs(): Promise<string> {
         const result = await PluginRegistry.apiWrapper.call(this, Job.prototype.mergeConsensusJobs);
         return result;
+    }
+
+    async runFunctionTrackerAction(
+        functionId: number,
+        payload: FunctionTrackerRunParams,
+    ): Promise<FunctionTrackerRunResult> {
+        const result = await PluginRegistry.apiWrapper.call(
+            this,
+            Job.prototype.runFunctionTrackerAction,
+            functionId,
+            payload,
+        );
+        return result as FunctionTrackerRunResult;
     }
 }
 

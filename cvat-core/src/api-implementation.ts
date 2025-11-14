@@ -69,6 +69,38 @@ export default function implementAPI(cvat: CVATCore): CVATCore {
     implementationMixin(cvat.lambda.listen, lambdaManager.listen.bind(lambdaManager));
     implementationMixin(cvat.lambda.requests, lambdaManager.requests.bind(lambdaManager));
 
+    implementationMixin(cvat.functions.list, async (filter = {}) => {
+        checkFilter(filter, {
+            page: isInteger,
+            page_size: isPageSize,
+            filter: isString,
+            search: isString,
+            kind: isString,
+        });
+
+        const params = filterFieldsToSnakeCase(filter, ['kind']);
+        const result = await serverProxy.functions.list(params);
+        return result;
+    });
+
+    implementationMixin(cvat.functions.requests.get, async (requestId: string) => {
+        if (!isString(requestId)) {
+            throw new ArgumentError('Request id must be a string');
+        }
+
+        const result = await serverProxy.functions.requests.get(requestId);
+        return result;
+    });
+
+    implementationMixin(cvat.functions.runs.get, async (runId: string) => {
+        if (!isString(runId)) {
+            throw new ArgumentError('Run id must be a string');
+        }
+
+        const result = await serverProxy.functions.runs.get(runId);
+        return result;
+    });
+
     implementationMixin(cvat.requests.list, requestsManager.list.bind(requestsManager));
     implementationMixin(cvat.requests.listen, requestsManager.listen.bind(requestsManager));
     implementationMixin(cvat.requests.cancel, requestsManager.cancel.bind(requestsManager));

@@ -139,6 +139,41 @@ For feedback, please see [Contact us](#contact-us)
 - [PyPI package homepage](https://pypi.org/project/cvat-cli/)
 - [Documentation](https://docs.cvat.ai/docs/api_sdk/cli/)
 
+## SAM2 tracker agent (docker compose)
+
+CVAT 2.42.0 and later ship an optional `sam2-agent` Docker Compose profile that lets the OSS stack run the Segment Anything 2 tracker end-to-end.
+
+1. Create a Personal Access Token (PAT) from your profile page and keep it handy.
+2. Register the bundled SAM2 function once and note the printed ID:
+
+   ```bash
+   cvat-cli --server-host=http://localhost --auth=<USER>:<PASS> \
+     function create-native "AI Tracker: SAM2" \
+     --function-file ai-models/tracker/sam2/func.py \
+    -p model_id=str:facebook/sam2.1-hiera-small \
+     -p device=str:cuda
+   ```
+3. Append the following variables to your root `.env` file so the UI, CLI, and agent reuse the same credentials and model settings (adjust the device/model as needed):
+
+   ```dotenv
+   CVAT_AGENT_TOKEN=<PAT_FROM_STEP_1>
+   SAM2_FUNCTION_ID=<ID_FROM_STEP_2>
+   SAM2_MODEL_ID=facebook/sam2.1-hiera-small
+   SAM2_DEVICE=cuda  # set to "cpu" on GPU-less hosts
+   SAM2_AGENT_CVAT_URL=http://cvat_server:8080
+   SAM2_AGENT_GPU_COUNT=1
+   ```
+4. Build and start the profile when you need hardware-accelerated tracking:
+
+   ```bash
+   docker compose --profile sam2-agent build sam2-agent
+   docker compose --profile sam2-agent up -d sam2-agent
+   ```
+
+   Follow the logs with `docker compose logs -f sam2-agent`. When running strictly on CPU, set `SAM2_DEVICE=cpu` and remove (or comment out) the `device_requests` block from `docker-compose.yml`.
+
+For a deeper walkthrough (including environment variable explanations and troubleshooting), see the [Segment Anything 2 tracker guide](https://docs.cvat.ai/docs/annotation/auto-annotation/segment-anything-2-tracker/).
+
 ## Supported annotation formats
 
 CVAT supports multiple annotation formats. You can select the format

@@ -89,6 +89,12 @@ from cvat.apps.engine.models import (
     StorageMethodChoice,
     Task,
 )
+from cvat.apps.functions.models import Function
+from cvat.apps.functions.serializers import (
+    TrackingActionRequestSerializer,
+    TrackingActionResponseSerializer,
+)
+from cvat.apps.functions.tracking import start_tracking_action
 from cvat.apps.engine.permissions import (
     AnnotationGuidePermission,
     CloudStoragePermission,
@@ -2092,6 +2098,38 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
 
         response_serializer = JobValidationLayoutReadSerializer(db_job)
         return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        methods=["POST"],
+        summary="Run a native SAM2 tracker action backed by an AI agent",
+        request=TrackingActionRequestSerializer,
+        responses={"202": TrackingActionResponseSerializer},
+    )
+    @action(
+        detail=True,
+        methods=["POST"],
+        url_path=r"functions/(?P<function_id>\d+)/tracker-actions",
+    )
+    def tracker_actions(self, request: ExtendedRequest, pk: int, function_id: str):
+        job = self.get_object()
+        serializer = TrackingActionRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            function = Function.objects.get(pk=int(function_id))
+        except (ValueError, Function.DoesNotExist) as exc:
+            raise ValidationError(detail={"function_id": "Function not found."}) from exc
+
+        result = start_tracking_action(
+            job=job,
+            function=function,
+            user=request.user,
+            **serializer.validated_data,
+        )
+
+        response_serializer = TrackingActionResponseSerializer(data=result)
+        response_serializer.is_valid(raise_exception=True)
+        return Response(response_serializer.data, status=status.HTTP_202_ACCEPTED)
 
 @extend_schema(tags=['issues'])
 @extend_schema_view(

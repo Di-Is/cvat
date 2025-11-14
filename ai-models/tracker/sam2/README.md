@@ -13,7 +13,7 @@ To use this with CVAT CLI, use the following options:
 ```
 
 where `<model_id>` is one of the [SAM2 model IDs][sam2-hf] from Meta's Hugging Face account,
-such as `facebook/sam2.1-hiera-tiny` or `facebook/sam2.1-hiera-large`.
+such as `facebook/sam2.1-hiera-small` (the OSS default) or `facebook/sam2.1-hiera-large`.
 
 [sam2-hf]: https://huggingface.co/models?search=facebook%2Fsam2
 

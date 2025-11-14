@@ -285,6 +285,24 @@ function build(): CVATCore {
                 return result;
             },
         },
+        functions: {
+            async list(filter = {}) {
+                const result = await PluginRegistry.apiWrapper(cvat.functions.list, filter);
+                return result;
+            },
+            requests: {
+                async get(requestId: string) {
+                    const result = await PluginRegistry.apiWrapper(cvat.functions.requests.get, requestId);
+                    return result;
+                },
+            },
+            runs: {
+                async get(runId: string) {
+                    const result = await PluginRegistry.apiWrapper(cvat.functions.runs.get, runId);
+                    return result;
+                },
+            },
+        },
         logger,
         config: {
             get backendAPI() {
@@ -492,6 +510,7 @@ function build(): CVATCore {
     cvat.users = Object.freeze(cvat.users);
     cvat.plugins = Object.freeze(cvat.plugins);
     cvat.lambda = Object.freeze(cvat.lambda);
+    cvat.functions = Object.freeze(cvat.functions);
     // logger: todo: logger storage implemented other way
     cvat.config = Object.freeze(cvat.config);
     cvat.enums = Object.freeze(cvat.enums);

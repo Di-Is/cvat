@@ -625,6 +625,43 @@ export function implementJob(Job: typeof JobClass): typeof JobClass {
         },
     });
 
+    Object.defineProperty(Job.prototype.runFunctionTrackerAction, 'implementation', {
+        value: async function runFunctionTrackerActionImplementation(
+            this: JobClass,
+            functionId: number,
+            payload,
+        ): Promise<{ runId: string; initialRequestId: string }> {
+            if (!Number.isInteger(functionId) || functionId <= 0) {
+                throw new ArgumentError('Function id must be a positive integer');
+            }
+
+            if (!payload || !Number.isInteger(payload.frame) || !Number.isInteger(payload.targetFrame)) {
+                throw new ArgumentError('Frame and targetFrame must be integers');
+            }
+
+            if (!Array.isArray(payload.trackIds) || payload.trackIds.length === 0) {
+                throw new ArgumentError('At least one track must be provided');
+            }
+
+            const trackIdsAreValid = payload.trackIds.every((trackId) => Number.isInteger(trackId) && trackId > 0);
+            if (!trackIdsAreValid) {
+                throw new ArgumentError('Track ids must be positive integers');
+            }
+
+            const requestBody = {
+                frame: payload.frame,
+                target_frame: payload.targetFrame,
+                track_ids: payload.trackIds,
+            };
+
+            const response = await serverProxy.jobs.runTrackerAction(this.id, functionId, requestBody);
+            return {
+                runId: response.run_id,
+                initialRequestId: response.initial_request_id,
+            };
+        },
+    });
+
     return Job;
 }
 

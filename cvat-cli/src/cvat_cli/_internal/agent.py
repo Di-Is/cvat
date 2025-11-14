@@ -34,7 +34,7 @@ from cvat_sdk.datasets.caching import make_cache_manager
 from cvat_sdk.exceptions import ApiException
 from typing_extensions import TypeAlias
 
-from .common import CriticalError, FunctionLoader
+from .common import CriticalError, FunctionLoader, raise_if_functions_api_missing
 
 if TYPE_CHECKING:
     from _typeshed import SupportsReadline
@@ -947,5 +947,8 @@ def run_agent(
         client.config.cache_dir = Path(cache_dir, "cache")
         client.logger.info("Will store cache at %s", client.config.cache_dir)
 
-        agent = _Agent(client, executor, function_id)
+        try:
+            agent = _Agent(client, executor, function_id)
+        except ApiException as exc:
+            raise_if_functions_api_missing(exc, action="Running native function agents")
         agent.run(burst=burst)

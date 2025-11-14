@@ -24,6 +24,7 @@ from cvat_sdk.core.client import (
     Credentials,
     PasswordCredentials,
 )
+from cvat_sdk.exceptions import ApiException
 
 from ..version import VERSION
 from .parsers import BuildDictAction, parse_function_parameter
@@ -200,6 +201,20 @@ def configure_function_implementation_arguments(parser: argparse.ArgumentParser)
         )
 
     parser.set_defaults(_executor=execute_with_function_loader)
+
+
+def raise_if_functions_api_missing(exc: ApiException, *, action: str) -> None:
+    """Convert 404/405 responses into actionable CLI errors."""
+
+    status = getattr(exc, "status", None)
+    if status in {404, 405}:
+        raise CriticalError(
+            "{} requires the native functions API (/api/functions), "
+            "but this server does not expose it. Upgrade to CVAT 2.42.0+ or "
+            "enable the cvat.apps.functions app in OSS deployments.".format(action)
+        ) from exc
+
+    raise exc
 
 
 @attrs.frozen

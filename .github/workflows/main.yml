@@ -85,6 +85,14 @@ jobs:
           tags: cvat/ui:${{ env.CVAT_VERSION }}
           outputs: type=docker,dest=/tmp/cvat_ui/image.tar
 
+      - name: SAM2 agent. Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.sam2-agent
+          tags: cvat/sam2-agent:${{ env.CVAT_VERSION }}
+          load: true
+
       - name: CVAT SDK. Build
         run: |
           pip3 install --user -r cvat-sdk/gen/requirements.txt

@@ -110,6 +110,7 @@ INSTALLED_APPS = [
     "cvat.apps.engine",
     "cvat.apps.dataset_repo",
     "cvat.apps.lambda_manager",
+    "cvat.apps.functions",
     "cvat.apps.webhooks",
     "cvat.apps.health",
     "cvat.apps.events",

@@ -238,6 +238,40 @@ _Go to System Settings_ → _General_ → _AirDrop & Handoff_ → _Untick Airpla
 You have done! Now it is possible to insert breakpoints and debug server and client of the tool.
 Instructions for running tests locally are available {{< ilink "/docs/contributing/running-tests" "here" >}}.
 
+### SAM2 tracker agent profile
+
+The root `docker-compose.yml` file ships an optional `sam2-agent` profile so that local contributors can exercise the Segment Anything 2 tracker end-to-end without depending on CVAT Online.
+
+1. Issue a Personal Access Token from the profile page (`Account` → `Access Tokens`) and keep the value for later use.
+2. Register the bundled SAM2 tracker once and note the returned function ID:
+
+   ```bash
+   cvat-cli --server-host=http://localhost --auth=<USER>:<PASS> \
+     function create-native "AI Tracker: SAM2" \
+     --function-file ai-models/tracker/sam2/func.py \
+      -p model_id=str:facebook/sam2.1-hiera-small \
+     -p device=str:cuda
+   ```
+3. Append the following variables to your `.env` file at the repository root so the UI, CLI, and agent share the same context:
+
+   ```dotenv
+   CVAT_AGENT_TOKEN=<PAT_FROM_STEP_1>
+   SAM2_FUNCTION_ID=<ID_FROM_STEP_2>
+  SAM2_MODEL_ID=facebook/sam2.1-hiera-small
+   SAM2_DEVICE=cuda  # switch to "cpu" on machines without NVIDIA GPUs
+   SAM2_AGENT_CVAT_URL=http://cvat_server:8080
+   SAM2_AGENT_GPU_COUNT=1
+   ```
+4. Build and start the profile when you need hardware-accelerated tracking:
+
+   ```bash
+   docker compose --profile sam2-agent build sam2-agent
+   docker compose --profile sam2-agent up -d sam2-agent
+   docker compose logs -f sam2-agent
+   ```
+
+   Set `SAM2_DEVICE=cpu` and remove the `device_requests` block (or set `SAM2_AGENT_GPU_COUNT=0` if your Docker version allows it) when GPUs are unavailable. See the [Segment Anything 2 tracker guide](/docs/annotation/auto-annotation/segment-anything-2-tracker/) for troubleshooting details.
+
 ## Note for Windows users
 
 You develop CVAT under WSL (Windows subsystem for Linux) following next steps.
@@ -295,4 +329,3 @@ In addition, you can completely disable analytics if you don't need it by deleti
 
 Analytics on GitHub:
 [Analytics Components](https://github.com/cvat-ai/cvat/tree/develop/components/analytics)
-

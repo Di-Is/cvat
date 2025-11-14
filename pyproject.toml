@@ -29,3 +29,8 @@ extend-exclude = """
 )
 | ^/serverless/
 """
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.0",
+]

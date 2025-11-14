@@ -10,6 +10,7 @@ from typing import Any, Union
 
 import cvat_sdk.auto_annotation as cvataa
 from cvat_sdk import Client, models
+from cvat_sdk.exceptions import ApiException
 
 from .agent import (
     FUNCTION_KIND_DETECTOR,
@@ -18,7 +19,11 @@ from .agent import (
     run_agent,
 )
 from .command_base import CommandGroup
-from .common import FunctionLoader, configure_function_implementation_arguments
+from .common import (
+    FunctionLoader,
+    configure_function_implementation_arguments,
+    raise_if_functions_api_missing,
+)
 
 COMMANDS = CommandGroup(description="Perform operations on CVAT lambda functions.")
 
@@ -95,11 +100,14 @@ class FunctionCreateNative:
         else:
             raise cvataa.BadFunctionError(f"Unsupported function spec type: {type(spec).__name__}")
 
-        _, response = client.api_client.call_api(
-            "/api/functions",
-            "POST",
-            body=remote_function,
-        )
+        try:
+            _, response = client.api_client.call_api(
+                "/api/functions",
+                "POST",
+                body=remote_function,
+            )
+        except ApiException as exc:
+            raise_if_functions_api_missing(exc, action="Creating native functions")
 
         remote_function = json.loads(response.data)
 

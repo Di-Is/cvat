@@ -31,6 +31,7 @@ import {
 import { Canvas } from 'cvat-canvas-wrapper';
 import { fetchAnnotationsAsync } from 'actions/annotation-actions';
 import { clamp } from 'utils/math';
+import NativeFunctionTrackerAction from './native-function-action';
 
 const core = getCore();
 
@@ -321,11 +322,32 @@ function AnnotationsActionsModalContent(props: Props): JSX.Element {
     const currentFrameAction = activeAction instanceof BaseCollectionAction || targetObjectState !== null;
 
     useEffect(() => {
-        core.actions.list().then((list: BaseAction[]) => {
-            dispatch(reducerActions.setAnnotationsActions(list));
+        async function initializeActions(): Promise<void> {
+            const builtInActions = await core.actions.list();
+            let combinedActions: BaseAction[] = [...builtInActions];
+
+            try {
+                const response = await core.functions.list({ page_size: 'all', kind: 'tracker' });
+                const trackerActions = (response.results ?? [])
+                    .filter((func) => (func.supported_shape_types ?? []).length > 0)
+                    .map((func) => new NativeFunctionTrackerAction(func));
+
+                const existingNames = new Set(builtInActions.map((action) => action.name));
+                combinedActions = [
+                    ...builtInActions,
+                    ...trackerActions.filter((action) => !existingNames.has(action.name)),
+                ];
+            } catch (error) {
+                notification.warning({
+                    message: 'Failed to load AI tracker actions',
+                    description: error instanceof Error ? error.message : undefined,
+                });
+            }
+
+            dispatch(reducerActions.setAnnotationsActions(combinedActions));
 
             if (defaultAnnotationAction) {
-                const defaultAction = list.find((action) => action.name === defaultAnnotationAction);
+                const defaultAction = combinedActions.find((action) => action.name === defaultAnnotationAction);
                 if (
                     defaultAction &&
                     (!defaultTargetObjectState || defaultAction.isApplicableForObject(defaultTargetObjectState))
@@ -338,7 +360,9 @@ function AnnotationsActionsModalContent(props: Props): JSX.Element {
             dispatch(reducerActions.updateFrameFrom(jobInstance.startFrame));
             dispatch(reducerActions.updateFrameTo(jobInstance.stopFrame));
             dispatch(reducerActions.updateTargetObjectState(defaultTargetObjectState ?? null));
-        });
+        }
+
+        initializeActions();
     }, []);
 
     return (

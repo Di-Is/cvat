@@ -8,7 +8,7 @@ import {
     ShapeType, StorageLocation, LabelType,
     ShareFileType, Source, TaskMode, TaskStatus,
     CloudStorageCredentialsType, CloudStorageProviderType, ObjectType,
-    DataStorageLocation,
+    DataStorageLocation, ModelKind,
 } from './enums';
 import { Camelized, CamelizedV2 } from './type-utils';
 
@@ -52,6 +52,11 @@ export interface APIApiTokensFilter extends APICommonFilterParams {
     name?: string;
 }
 export type ApiTokensFilter = CamelizedV2<APIApiTokensFilter>;
+
+export interface APIFunctionsFilter extends APICommonFilterParams {
+    kind?: ModelKind;
+}
+export type FunctionsFilter = CamelizedV2<APIFunctionsFilter>;
 
 export interface SerializedUser {
     url: string;
@@ -185,6 +190,25 @@ export interface SerializedLabel {
     sublabels?: SerializedLabel[];
     has_parent?: boolean;
     attributes: SerializedAttribute[];
+}
+
+export interface SerializedFunctionLabelSpec {
+    name: string;
+    type: string;
+    attributes: Record<string, unknown>[];
+    sublabels: Record<string, unknown>[];
+}
+
+export interface SerializedFunction {
+    id: number;
+    name: string;
+    description: string;
+    provider: string;
+    kind: ModelKind;
+    supported_shape_types: ShapeType[];
+    labels_v2: SerializedFunctionLabelSpec[];
+    created_at: string;
+    updated_at: string;
 }
 
 export interface SerializedAbout {
@@ -491,6 +515,34 @@ export interface SerializedCloudStorage {
     updated_date?: string;
     manifest_path?: string;
     manifests?: string[];
+}
+
+export interface SerializedAnnotationRequestDetail {
+    id: string;
+    function_id: number;
+    status: string;
+    category: string;
+    type: string;
+    progress: number;
+    result: Record<string, unknown>;
+    parameters: Record<string, unknown>;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface SerializedTrackingActionResponse {
+    run_id: string;
+    initial_request_id: string;
+}
+
+export interface SerializedFunctionRunStatus {
+    run_id: string;
+    status: string;
+    progress: number;
+    active_request_id: string | null;
+    failed_request_id: string | null;
+    total_requests: number;
+    completed_requests: number;
 }
 
 export interface SerializedFramesMetaData {

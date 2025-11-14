@@ -5,6 +5,8 @@
 import {
     AnalyticsEventsFilter, QualityConflictsFilter, QualityReportsFilter,
     QualitySettingsFilter, ConsensusSettingsFilter, ApiTokensFilter,
+    FunctionsFilter, SerializedFunction, SerializedAnnotationRequestDetail,
+    SerializedFunctionRunStatus,
 } from './server-response-types';
 import PluginRegistry from './plugins';
 import serverProxy from './server-proxy';
@@ -65,6 +67,15 @@ export default interface CVATCore {
         cancel: typeof lambdaManager.cancel;
         listen: typeof lambdaManager.listen;
         requests: typeof lambdaManager.requests;
+    };
+    functions: {
+        list: (filter?: FunctionsFilter) => Promise<PaginatedResource<SerializedFunction>>;
+        requests: {
+            get: (requestId: string) => Promise<SerializedAnnotationRequestDetail>;
+        };
+        runs: {
+            get: (runId: string) => Promise<SerializedFunctionRunStatus>;
+        };
     };
     server: {
         about: () => Promise<AboutData>;

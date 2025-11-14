@@ -1843,6 +1843,39 @@ async function getLambdaFunctions() {
     }
 }
 
+async function getNativeFunctions(params = {}) {
+    const { backendAPI } = config;
+
+    try {
+        const response = await Axios.get(`${backendAPI}/functions`, { params });
+        return response.data;
+    } catch (errorData) {
+        throw generateError(errorData);
+    }
+}
+
+async function getAnnotationRequestDetail(requestId: string) {
+    const { backendAPI } = config;
+
+    try {
+        const response = await Axios.get(`${backendAPI}/functions/requests/${requestId}`);
+        return response.data;
+    } catch (errorData) {
+        throw generateError(errorData);
+    }
+}
+
+async function getFunctionRunStatus(runId: string) {
+    const { backendAPI } = config;
+
+    try {
+        const response = await Axios.get(`${backendAPI}/functions/runs/${runId}`);
+        return response.data;
+    } catch (errorData) {
+        throw generateError(errorData);
+    }
+}
+
 async function runLambdaRequest(body) {
     const { backendAPI } = config;
 
@@ -1894,6 +1927,20 @@ async function cancelLambdaRequest(requestId) {
 
     try {
         await Axios.delete(`${backendAPI}/lambda/requests/${requestId}`);
+    } catch (errorData) {
+        throw generateError(errorData);
+    }
+}
+
+async function runFunctionTrackerAction(jobId: number, functionId: number, body) {
+    const { backendAPI } = config;
+
+    try {
+        const response = await Axios.post(
+            `${backendAPI}/jobs/${jobId}/functions/${functionId}/tracker-actions`,
+            body,
+        );
+        return response.data;
     } catch (errorData) {
         throw generateError(errorData);
     }
@@ -2526,6 +2573,7 @@ export default Object.freeze({
         exportDataset: exportDataset('jobs'),
         validationLayout: validationLayout('jobs'),
         mergeConsensusJobs,
+        runTrackerAction: runFunctionTrackerAction,
     }),
 
     users: Object.freeze({
@@ -2567,6 +2615,16 @@ export default Object.freeze({
         run: runLambdaRequest,
         call: callLambdaFunction,
         cancel: cancelLambdaRequest,
+    }),
+
+    functions: Object.freeze({
+        list: getNativeFunctions,
+        requests: Object.freeze({
+            get: getAnnotationRequestDetail,
+        }),
+        runs: Object.freeze({
+            get: getFunctionRunStatus,
+        }),
     }),
 
     issues: Object.freeze({

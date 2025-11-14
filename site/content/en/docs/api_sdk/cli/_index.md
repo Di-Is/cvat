@@ -379,8 +379,11 @@ see that command's examples for more information.
 
 ## Examples - functions
 
-**Note**: The functionality described in this section can only be used
-with the CVAT Enterprise or CVAT Cloud.
+**Note**: The functionality described in this section relies on the native functions API (`/api/functions`).
+It is available on CVAT Online, CVAT Enterprise, and on self-hosted CVAT OSS deployments starting with version 2.42.0 (make sure the `cvat.apps.functions` Django app is enabled).
+For docker compose users, the bundled `sam2-agent` service described in the
+{{< ilink "/docs/annotation/auto-annotation/segment-anything-2-tracker" "SAM2 tracker guide" >}}
+keeps a CLI agent online inside your stack.
 
 ### Create
 
@@ -401,10 +404,10 @@ with the CVAT Enterprise or CVAT Cloud.
   ```
   cvat-cli function create-native "SAM2" \
       --function-file=<CVAT_DIR>/ai-models/tracker/sam2/func.py \
-      -p model_id=str:facebook/sam2.1-hiera-tiny
+      -p model_id=str:facebook/sam2.1-hiera-small
   cvat-cli function run-agent <ID printed by previous command> \
       --function-file=<CVAT_DIR>/ai-models/tracker/sam2/func.py \
-      -p model_id=str:facebook/sam2.1-hiera-tiny
+      -p model_id=str:facebook/sam2.1-hiera-small
   ```
 
 These commands accept functions that implement the
