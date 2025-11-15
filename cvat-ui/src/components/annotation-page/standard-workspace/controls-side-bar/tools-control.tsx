@@ -27,7 +27,7 @@ import lodash, { omit } from 'lodash';
 import { AIToolsIcon } from 'icons';
 import { Canvas, convertShapesForInteractor } from 'cvat-canvas-wrapper';
 import {
-    getCore, Label, MLModel, ObjectState, ObjectType, ShapeType, Job,
+    getCore, Label, MLModel, ModelProviders, ObjectState, ObjectType, ShapeType, Job,
     MinimalShape, InteractorResults, TrackerResults,
 } from 'cvat-core-wrapper';
 import openCVWrapper, { MatType } from 'utils/opencv-wrapper/opencv-wrapper';
@@ -222,13 +222,15 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
         };
         latestPostponedEvent: Event | null;
         latestApproximatedPoints: number[][];
-        latestRequest: null | {
+        latestRequest: {
             interactor: MLModel;
             data: {
                 frame: number;
                 neg_points: number[][];
                 pos_points: number[][];
-                obj_bbox: number[][];
+                obj_bbox: number[][] | null;
+                label_id: number | null;
+                start_with_box: boolean;
             };
         } | null;
         hideMessage: (() => void) | null;
@@ -402,27 +404,52 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                 // run server request
                 this.setState({ fetching: true });
 
-                const response = await core.lambda.call(
-                    jobInstance.taskId,
-                    interactor,
-                    { ...data, job: jobInstance.id },
-                ) as InteractorResults;
+                let response: InteractorResults & { mask_rle?: number[] };
+                if (interactor.provider === ModelProviders.NATIVE) {
+                    const functionId = Number(interactor.id);
+                    if (!Number.isInteger(functionId)) {
+                        throw new Error('Native interactor id must be a number');
+                    }
+
+                    response = await jobInstance.runFunctionInteractor(functionId, {
+                        frame: data.frame,
+                        posPoints: data.pos_points,
+                        negPoints: data.neg_points,
+                        objBBox: data.obj_bbox,
+                        labelId: data.label_id,
+                        startWithBox: data.start_with_box,
+                    });
+                } else {
+                    response = await core.lambda.call(
+                        jobInstance.taskId,
+                        interactor,
+                        { ...data, job: jobInstance.id },
+                    ) as InteractorResults;
+                }
+
+                const normalizedResponse = this.normalizeInteractorResponse(response);
 
                 // if only mask presented, let's receive points
-                if (response.mask && !response.points) {
-                    const left = response.bounds ? response.bounds[0] : 0;
-                    const top = response.bounds ? response.bounds[1] : 0;
-                    response.points = await this.receivePointsFromMask(response.mask, left, top);
+                if (normalizedResponse.mask && !normalizedResponse.points) {
+                    const left = normalizedResponse.bounds ? normalizedResponse.bounds[0] : 0;
+                    const top = normalizedResponse.bounds ? normalizedResponse.bounds[1] : 0;
+                    normalizedResponse.points = await this.receivePointsFromMask(
+                        normalizedResponse.mask,
+                        left,
+                        top,
+                    );
                 }
 
                 // approximation with cv.approxPolyDP
-                const approximated = await this.approximateResponsePoints(response.points as [number, number][]);
-                const rle = core.utils.mask2Rle(response.mask.flat());
-                if (response.bounds) {
-                    rle.push(...response.bounds);
+                const approximated = await this.approximateResponsePoints(
+                    normalizedResponse.points as [number, number][],
+                );
+                const rle = core.utils.mask2Rle(normalizedResponse.mask.flat());
+                if (normalizedResponse.bounds) {
+                    rle.push(...normalizedResponse.bounds);
                 } else {
-                    const height = response.mask.length;
-                    const width = response.mask[0].length;
+                    const height = normalizedResponse.mask.length;
+                    const width = normalizedResponse.mask[0].length;
                     rle.push(0, 0, width - 1, height - 1);
                 }
 
@@ -432,13 +459,13 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
                 }
 
                 this.interaction.latestResponse = {
-                    bounds: response.bounds,
-                    points: response.points as [number, number][],
+                    bounds: normalizedResponse.bounds,
+                    points: normalizedResponse.points as [number, number][],
                     rle,
                 };
                 this.interaction.latestApproximatedPoints = approximated;
 
-                this.setState({ pointsReceived: !!response.points?.length });
+                this.setState({ pointsReceived: !!normalizedResponse.points?.length });
             } finally {
                 if (this.interaction.id === interactionId && this.interaction.hideMessage) {
                     this.interaction.hideMessage();
@@ -469,9 +496,34 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
         }
     };
 
+    private normalizeInteractorResponse(
+        response: InteractorResults & { mask_rle?: number[] },
+    ): InteractorResults & { mask: number[][] } {
+        if (response.mask) {
+            return response as InteractorResults & { mask: number[][] };
+        }
+
+        if (response.mask_rle && response.bounds) {
+            const [left, top, right, bottom] = response.bounds;
+            const width = Math.max(1, (right - left) + 1);
+            const height = Math.max(1, (bottom - top) + 1);
+            const flatMask = core.utils.rle2Mask(response.mask_rle, width, height);
+            const rows: number[][] = [];
+            for (let row = 0; row < height; row++) {
+                rows.push(flatMask.slice(row * width, (row + 1) * width));
+            }
+            return {
+                ...response,
+                mask: rows,
+            };
+        }
+
+        throw new Error('Interactor response does not include mask data');
+    }
+
     private onInteraction = (e: Event): void => {
         const { frame, isActivated } = this.props;
-        const { activeInteractor } = this.state;
+        const { activeInteractor, startInteractingWithBox, activeLabelID } = this.state;
 
         if (!isActivated) {
             return;
@@ -493,13 +545,21 @@ export class ToolsControlComponent extends React.PureComponent<Props, State> {
             }
         } else if (shapesUpdated) {
             const interactor = activeInteractor as MLModel;
+            const bbox = convertShapesForInteractor(shapes, 'rectangle', 0);
+            const posPoints = convertShapesForInteractor(shapes, 'points', 0);
+            const negPoints = convertShapesForInteractor(shapes, 'points', 2);
+            const startWithBox = interactor.params.canvas.startWithBoxOptional ?
+                startInteractingWithBox :
+                Boolean(interactor.params.canvas.startWithBox);
             this.interaction.latestRequest = {
                 interactor,
                 data: {
                     frame,
-                    obj_bbox: convertShapesForInteractor(shapes, 'rectangle', 0),
-                    pos_points: convertShapesForInteractor(shapes, 'points', 0),
-                    neg_points: convertShapesForInteractor(shapes, 'points', 2),
+                    obj_bbox: bbox.length ? bbox : null,
+                    pos_points: posPoints,
+                    neg_points: negPoints,
+                    label_id: activeLabelID,
+                    start_with_box: startWithBox,
                 },
             };
 

@@ -357,6 +357,9 @@ NUCLIO = {
 
 assert NUCLIO["INVOKE_METHOD"] in {"dashboard", "direct"}
 
+CVAT_FUNCTION_INTERACT_TIMEOUT = int(os.getenv("CVAT_FUNCTION_INTERACT_TIMEOUT", 60))
+MAX_CONCURRENT_INTERACT_WAIT = int(os.getenv("CVAT_MAX_CONCURRENT_INTERACT_WAIT", 2))
+
 RQ_SHOW_ADMIN_LINK = True
 RQ_EXCEPTION_HANDLERS = [
     "cvat.apps.engine.views.rq_exception_handler",

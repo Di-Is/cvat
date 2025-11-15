@@ -4,7 +4,7 @@
 
 import abc
 from collections.abc import Sequence, Set
-from typing import Optional, Protocol, TypeVar, Union
+from typing import Optional, Protocol, Tuple, TypeVar, Union
 
 import attrs
 import PIL.Image
@@ -399,6 +399,151 @@ class TrackingFunction(AutoAnnotationFunction, Protocol[_PreprocessedImage, _Tra
         If the function returns a shape, that shape must have the same type
         as that of the shape used to create `state`.
         """
+        ...
+
+
+Point: TypeAlias = Tuple[float, float]
+
+
+def _convert_points(points: Sequence[Sequence[float]]) -> tuple[Point, ...]:
+    return tuple(tuple(map(float, point)) for point in points)
+
+
+def _convert_optional_bbox(
+    value: Optional[Sequence[Sequence[float]]],
+) -> Optional[tuple[Point, Point]]:
+    if value in (None, []):
+        return None
+
+    bbox = _convert_points(value)
+    if len(bbox) != 2:
+        raise BadFunctionError("Bounding box must consist of two points")
+
+    return (bbox[0], bbox[1])
+
+
+def _convert_optional_mask(
+    rows: Optional[Sequence[Sequence[int]]],
+) -> Optional[tuple[tuple[int, ...], ...]]:
+    if rows is None:
+        return None
+
+    return tuple(tuple(int(cell) for cell in row) for row in rows)
+
+
+def _convert_optional_int_sequence(values: Optional[Sequence[int]]) -> Optional[tuple[int, ...]]:
+    if values is None:
+        return None
+
+    return tuple(int(v) for v in values)
+
+
+def _convert_optional_points(
+    points: Optional[Sequence[Sequence[float]]],
+) -> Optional[tuple[Point, ...]]:
+    if points is None:
+        return None
+
+    return _convert_points(points)
+
+
+@attrs.frozen(kw_only=True)
+class InteractionPrompt:
+    positive_points: tuple[Point, ...] = attrs.field(converter=_convert_points)
+    negative_points: tuple[Point, ...] = attrs.field(
+        default=tuple(), converter=_convert_points
+    )
+    bounding_box: Optional[tuple[Point, Point]] = attrs.field(
+        default=None, converter=_convert_optional_bbox
+    )
+    start_with_box: bool = attrs.field(default=False)
+    label_id: Optional[int] = attrs.field(default=None)
+
+
+@attrs.frozen(kw_only=True)
+class MaskPrediction:
+    mask: Optional[tuple[tuple[int, ...], ...]] = attrs.field(
+        default=None, converter=_convert_optional_mask
+    )
+    mask_rle: Optional[tuple[int, ...]] = attrs.field(
+        default=None, converter=_convert_optional_int_sequence
+    )
+    bounds: Optional[tuple[int, ...]] = attrs.field(
+        default=None, converter=_convert_optional_int_sequence
+    )
+    points: Optional[tuple[Point, ...]] = attrs.field(
+        default=None, converter=_convert_optional_points
+    )
+
+    def __attrs_post_init__(self) -> None:
+        if self.mask is None and self.mask_rle is None:
+            raise BadFunctionError("MaskPrediction must contain mask or mask_rle data")
+
+
+@attrs.frozen(kw_only=True)
+class InteractorFunctionSpec:
+    min_pos_points: int = attrs.field(default=1)
+    min_neg_points: int = attrs.field(default=-1)
+    startswith_box: bool = attrs.field(default=False)
+    startswith_box_optional: bool = attrs.field(default=False)
+    help_message: str = attrs.field(default="")
+    animated_gif: str = attrs.field(default="")
+    version: int = attrs.field(default=1)
+
+    @min_pos_points.validator
+    def _validate_min_pos_points(self, attribute, value: int) -> None:  # noqa: D401
+        if value < 0:
+            raise BadFunctionError("min_pos_points must be >= 0")
+
+    @min_neg_points.validator
+    def _validate_min_neg_points(self, attribute, value: int) -> None:
+        if value < -1:
+            raise BadFunctionError("min_neg_points must be >= -1")
+
+    @version.validator
+    def _validate_version(self, attribute, value: int) -> None:
+        if value < 1:
+            raise BadFunctionError("version must be >= 1")
+
+
+class InteractorFunctionContext(metaclass=abc.ABCMeta):
+    @property
+    @abc.abstractmethod
+    def task_id(self) -> int:
+        ...
+
+    @property
+    @abc.abstractmethod
+    def job_id(self) -> Optional[int]:
+        ...
+
+    @property
+    @abc.abstractmethod
+    def frame_index(self) -> int:
+        ...
+
+    @property
+    @abc.abstractmethod
+    def job_frame_index(self) -> int:
+        ...
+
+    @property
+    @abc.abstractmethod
+    def frame_name(self) -> str:
+        ...
+
+
+class InteractorFunction(AutoAnnotationFunction, Protocol):
+    @property
+    def spec(self) -> InteractorFunctionSpec:
+        ...
+
+    def interact(
+        self,
+        context: InteractorFunctionContext,
+        image: PIL.Image.Image,
+        prompt: InteractionPrompt,
+    ) -> MaskPrediction:
         ...
 
 

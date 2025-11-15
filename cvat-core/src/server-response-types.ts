@@ -206,6 +206,13 @@ export interface SerializedFunction {
     provider: string;
     kind: ModelKind;
     supported_shape_types: ShapeType[];
+    min_pos_points: number;
+    min_neg_points: number;
+    startswith_box: boolean;
+    startswith_box_optional: boolean;
+    help_message: string;
+    animated_gif: string;
+    version: number;
     labels_v2: SerializedFunctionLabelSpec[];
     created_at: string;
     updated_at: string;

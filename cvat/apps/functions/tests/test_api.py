@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import uuid
@@ -23,6 +24,7 @@ from cvat.apps.engine.models import (
     User,
 )
 from cvat.apps.engine.tests.utils import ApiTestBase
+from cvat.apps.functions import interactors
 from cvat.apps.functions.models import (
     AnnotationRequest,
     AnnotationRequestCategory,
@@ -464,6 +466,85 @@ class FunctionsApiTests(ApiTestBase):
 
         second_track_request = AnnotationRequest.objects.get(type="track", parameters__frame=2)
         self.assertEqual(second_track_request.parameters["states"], ["state-updated"])
+
+    @mock.patch("cvat.apps.functions.interactors.wait_for_interactor_request")
+    @mock.patch("cvat.apps.functions.interactors.interactor_wait_slot")
+    def test_run_native_interactor_returns_result(
+        self,
+        mock_wait_slot,
+        mock_wait,
+    ):
+        mock_wait_slot.side_effect = lambda: contextlib.nullcontext()
+        mock_wait.return_value = {"mask_rle": [1, 2, 3, 4], "bounds": [0, 0, 1, 1]}
+        function = self._create_function(self.owner, kind=FunctionKind.INTERACTOR)
+
+        response = self._post_request(
+            f"/api/jobs/{self.job.id}/functions/{function.id}/interactions",
+            self.owner,
+            data={
+                "frame": 0,
+                "pos_points": [[10.0, 15.0]],
+                "neg_points": [],
+                "obj_bbox": [[0.0, 0.0], [1.0, 1.0]],
+                "start_with_box": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(payload["mask_rle"], [1, 2, 3, 4])
+        self.assertEqual(payload["bounds"], [0, 0, 1, 1])
+        requests = AnnotationRequest.objects.filter(
+            function=function,
+            category=AnnotationRequestCategory.INTERACTIVE,
+        )
+        self.assertEqual(requests.count(), 1)
+        mock_wait.assert_called_once()
+
+    @mock.patch("cvat.apps.functions.interactors.interactor_wait_slot")
+    def test_run_native_interactor_429_when_slots_busy(self, mock_wait_slot):
+        def _raise():
+            raise interactors.InteractorWaitQueueBusy()
+
+        mock_wait_slot.side_effect = _raise
+        function = self._create_function(self.owner, kind=FunctionKind.INTERACTOR)
+
+        response = self._post_request(
+            f"/api/jobs/{self.job.id}/functions/{function.id}/interactions",
+            self.owner,
+            data={
+                "frame": 0,
+                "pos_points": [[10.0, 15.0]],
+                "neg_points": [],
+                "obj_bbox": [[0.0, 0.0], [1.0, 1.0]],
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    @mock.patch("cvat.apps.functions.interactors.wait_for_interactor_request")
+    @mock.patch("cvat.apps.functions.interactors.interactor_wait_slot")
+    def test_run_native_interactor_timeout_returns_504(
+        self,
+        mock_wait_slot,
+        mock_wait,
+    ):
+        mock_wait_slot.side_effect = lambda: contextlib.nullcontext()
+        mock_wait.side_effect = interactors.InteractorRequestTimeoutError("timeout")
+        function = self._create_function(self.owner, kind=FunctionKind.INTERACTOR)
+
+        response = self._post_request(
+            f"/api/jobs/{self.job.id}/functions/{function.id}/interactions",
+            self.owner,
+            data={
+                "frame": 0,
+                "pos_points": [[10.0, 15.0]],
+                "neg_points": [],
+                "obj_bbox": [[0.0, 0.0], [1.0, 1.0]],
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_504_GATEWAY_TIMEOUT)
 
     def _create_track(self, *, frame: int = 0) -> LabeledTrack:
         track = LabeledTrack.objects.create(

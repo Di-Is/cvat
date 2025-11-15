@@ -162,6 +162,7 @@ export enum ModelKind {
 
 export enum ModelProviders {
     CVAT = 'cvat',
+    NATIVE = 'native',
 }
 
 export const colors = [

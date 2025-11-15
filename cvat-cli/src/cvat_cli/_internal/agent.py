@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 FUNCTION_PROVIDER_NATIVE = "native"
 FUNCTION_KIND_DETECTOR = "detector"
 FUNCTION_KIND_TRACKER = "tracker"
+FUNCTION_KIND_INTERACTOR = "interactor"
 REQUEST_CATEGORY_BATCH = "batch"
 REQUEST_CATEGORY_INTERACTIVE = "interactive"
 
@@ -233,6 +234,42 @@ def _worker_job_track(
     return list(map(track, states))
 
 
+def _worker_job_interact(
+    context: cvataa.InteractorFunctionContext,
+    image: PIL.Image.Image,
+    prompt: cvataa.InteractionPrompt,
+) -> cvataa.MaskPrediction:
+    return _current_function.interact(context, image, prompt)
+
+
+def _serialize_mask_prediction(prediction: cvataa.MaskPrediction) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+
+    if prediction.mask is not None:
+        payload["mask"] = [list(row) for row in prediction.mask]
+
+    if prediction.mask_rle is not None:
+        payload["mask_rle"] = list(prediction.mask_rle)
+
+    if prediction.bounds is not None:
+        payload["bounds"] = list(prediction.bounds)
+
+    if prediction.points is not None:
+        payload["points"] = [list(point) for point in prediction.points]
+
+    return payload
+
+
+def _build_interaction_prompt(ar_params: dict) -> cvataa.InteractionPrompt:
+    return cvataa.InteractionPrompt(
+        positive_points=ar_params["pos_points"],
+        negative_points=ar_params.get("neg_points", []),
+        bounding_box=ar_params.get("obj_bbox"),
+        start_with_box=bool(ar_params.get("start_with_box")),
+        label_id=ar_params.get("label_id"),
+    )
+
+
 @attrs.frozen
 class _Event:
     type: str
@@ -373,6 +410,43 @@ class _TrackingFunctionShapeContextImpl(cvataa.TrackingFunctionShapeContext):
     original_shape_type: str
 
 
+class _InteractorFunctionContextImpl(cvataa.InteractorFunctionContext):
+    def __init__(
+        self,
+        *,
+        task_id: int,
+        job_id: Optional[int],
+        frame_index: int,
+        job_frame_index: int,
+        frame_name: str,
+    ) -> None:
+        self._task_id = task_id
+        self._job_id = job_id
+        self._frame_index = frame_index
+        self._job_frame_index = job_frame_index
+        self._frame_name = frame_name
+
+    @property
+    def task_id(self) -> int:
+        return self._task_id
+
+    @property
+    def job_id(self) -> Optional[int]:
+        return self._job_id
+
+    @property
+    def frame_index(self) -> int:
+        return self._frame_index
+
+    @property
+    def job_frame_index(self) -> int:
+        return self._job_frame_index
+
+    @property
+    def frame_name(self) -> str:
+        return self._frame_name
+
+
 class _Agent:
     def __init__(self, client: Client, executor: _RecoverableExecutor, function_id: int):
         self._rng = random.Random()  # nosec
@@ -433,6 +507,9 @@ class _Agent:
             elif isinstance(self._function_spec, cvataa.TrackingFunctionSpec):
                 self._validate_tracking_function_compatibility(remote_function)
                 self._calculate_result_for_ar = self._calculate_result_for_tracking_ar
+            elif isinstance(self._function_spec, cvataa.InteractorFunctionSpec):
+                self._validate_interactor_function_compatibility(remote_function)
+                self._calculate_result_for_ar = self._calculate_result_for_interactor_ar
             else:
                 raise CriticalError(
                     f"Unsupported function spec type: {type(self._function_spec).__name__}"
@@ -505,6 +582,27 @@ class _Agent:
                 "the function object does not support the following shape types: "
                 + ", ".join(map(repr, unsupported))
             )
+
+    def _validate_interactor_function_compatibility(self, remote_function: dict) -> None:
+        self._validate_remote_function_kind(remote_function, FUNCTION_KIND_INTERACTOR)
+
+        field_names = (
+            "min_pos_points",
+            "min_neg_points",
+            "startswith_box",
+            "startswith_box_optional",
+            "help_message",
+            "animated_gif",
+            "version",
+        )
+
+        for field_name in field_names:
+            remote_value = remote_function.get(field_name)
+            spec_value = getattr(self._function_spec, field_name)
+            if remote_value != spec_value:
+                raise _IncompatibleFunctionError(
+                    f"{field_name} is {remote_value!r}, but the function object declares {spec_value!r}."
+                )
 
     def _validate_remote_function_kind(self, remote_function: dict, expected_kind: str) -> None:
         if remote_function["kind"] != expected_kind:
@@ -903,6 +1001,33 @@ class _Agent:
             "states": states,
             "shapes": [attrs.asdict(shape) if shape else None for shape in shapes],
         }
+
+    def _calculate_result_for_interactor_ar(self, ar_id: str, ar_params) -> dict[str, Any]:
+        if ar_params["type"] != "interact":
+            raise _BadArError(f"unsupported type: {ar_params['type']!r}")
+
+        with self._task_cache_limiter.using_cache_for_task(
+            ar_params["task"], with_chunks=False
+        ):
+            sample, _ = self._get_sample_from_ar_params(ar_params)
+            prompt = _build_interaction_prompt(ar_params)
+            context = _InteractorFunctionContextImpl(
+                task_id=ar_params["task"],
+                job_id=ar_params.get("job"),
+                frame_index=sample.frame_index,
+                job_frame_index=ar_params["frame"],
+                frame_name=sample.frame_name,
+            )
+            prediction = self._executor.result(
+                self._executor.submit(
+                    _worker_job_interact,
+                    context,
+                    sample.media.load_image(),
+                    prompt,
+                )
+            )
+
+        return _serialize_mask_prediction(prediction)
 
     def _get_sample_from_ar_params(self, ar_params):
         ds = cvatds.TaskDataset(

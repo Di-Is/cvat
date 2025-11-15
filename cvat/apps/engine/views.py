@@ -14,7 +14,7 @@ import zlib
 from abc import ABCMeta, abstractmethod
 from contextlib import suppress
 from copy import copy
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional, Union, cast
@@ -89,8 +89,11 @@ from cvat.apps.engine.models import (
     StorageMethodChoice,
     Task,
 )
+from cvat.apps.functions import interactors
 from cvat.apps.functions.models import Function
 from cvat.apps.functions.serializers import (
+    InteractorActionRequestSerializer,
+    InteractorActionResponseSerializer,
     TrackingActionRequestSerializer,
     TrackingActionResponseSerializer,
 )
@@ -2097,6 +2100,67 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
             db_job = request_serializer.save()
 
         response_serializer = JobValidationLayoutReadSerializer(db_job)
+        return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Run a native SAM2 interactor action backed by an AI agent",
+        request=InteractorActionRequestSerializer,
+        responses={"200": InteractorActionResponseSerializer},
+    )
+    @action(
+        detail=True,
+        methods=["POST"],
+        url_path=r"functions/(?P<function_id>\d+)/interactions",
+    )
+    def function_interactions(self, request: ExtendedRequest, pk: int, function_id: str):
+        job = self.get_object()
+        serializer = InteractorActionRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            function = Function.objects.get(pk=int(function_id))
+        except (ValueError, Function.DoesNotExist) as exc:
+            raise ValidationError(detail={"function_id": "Function not found."}) from exc
+
+        payload = interactors.InteractorRequestPayload(
+            frame=serializer.validated_data["frame"],
+            pos_points=serializer.validated_data["pos_points"],
+            neg_points=serializer.validated_data.get("neg_points", []),
+            obj_bbox=serializer.validated_data.get("obj_bbox"),
+            label_id=serializer.validated_data.get("label_id"),
+            start_with_box=serializer.validated_data.get("start_with_box", False),
+        )
+
+        timeout_seconds = getattr(settings, "CVAT_FUNCTION_INTERACT_TIMEOUT", 60)
+        timeout = timedelta(seconds=timeout_seconds)
+
+        try:
+            with interactors.interactor_wait_slot():
+                annotation_request = interactors.start_interactor_request(
+                    job=job,
+                    function=function,
+                    user=request.user,
+                    payload=payload,
+                )
+                result_payload = interactors.wait_for_interactor_request(
+                    annotation_request,
+                    timeout=timeout,
+                )
+        except interactors.InteractorWaitQueueBusy:
+            return Response(
+                {"detail": "Too many concurrent interactor requests. Please retry shortly."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        except interactors.InteractorRequestTimeoutError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_504_GATEWAY_TIMEOUT,
+            )
+        except interactors.InteractorRequestFailed as exc:
+            raise ValidationError({"detail": str(exc)}) from exc
+
+        response_serializer = InteractorActionResponseSerializer(data=result_payload)
+        response_serializer.is_valid(raise_exception=True)
         return Response(response_serializer.data, status=status.HTTP_200_OK)
 
     @extend_schema(

@@ -10,7 +10,8 @@ import { RQStatus, ShapeType } from './enums';
 import { SerializedCollection } from './server-response-types';
 
 export interface InteractorResults {
-    mask: number[][];
+    mask?: number[][];
+    mask_rle?: number[];
     points?: [number, number][];
     bounds?: [number, number, number, number]
 }

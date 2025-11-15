@@ -11,6 +11,7 @@ import {
     RQStatus,
 } from './enums';
 import { Task as TaskClass, Job as JobClass } from './session';
+import type { InteractorResults } from './lambda-manager';
 import logger from './logger';
 import serverProxy from './server-proxy';
 import {
@@ -41,6 +42,7 @@ import requestsManager from './requests-manager';
 import { Request } from './request';
 import User from './user';
 import { JobValidationLayout, TaskValidationLayout } from './validation-layout';
+import { rle2Mask } from './object-utils';
 
 // must be called with task/job context
 async function deleteFrameWrapper(jobID, frame): Promise<void> {
@@ -659,6 +661,60 @@ export function implementJob(Job: typeof JobClass): typeof JobClass {
                 runId: response.run_id,
                 initialRequestId: response.initial_request_id,
             };
+        },
+    });
+
+    Object.defineProperty(Job.prototype.runFunctionInteractor, 'implementation', {
+        value: async function runFunctionInteractorImplementation(
+            this: JobClass,
+            functionId: number,
+            payload,
+        ): Promise<InteractorResults> {
+            if (!Number.isInteger(functionId) || functionId <= 0) {
+                throw new ArgumentError('Function id must be a positive integer');
+            }
+
+            if (!payload || !Number.isInteger(payload.frame) || payload.frame < 0) {
+                throw new ArgumentError('Frame must be a non-negative integer');
+            }
+
+            if (!Array.isArray(payload.posPoints) || payload.posPoints.length === 0) {
+                throw new ArgumentError('Positive points array is required');
+            }
+
+            const requestBody = {
+                frame: payload.frame,
+                pos_points: payload.posPoints,
+                neg_points: Array.isArray(payload.negPoints) ? payload.negPoints : [],
+                obj_bbox: payload.objBBox && payload.objBBox.length ? payload.objBBox : null,
+                label_id: typeof payload.labelId === 'number' ? payload.labelId : null,
+                start_with_box: Boolean(payload.startWithBox),
+            };
+
+            const response = await serverProxy.jobs.runInteractorAction(this.id, functionId, requestBody);
+
+            if (!response.mask && Array.isArray(response.mask_rle)) {
+                const bounds = Array.isArray(response.bounds) ? response.bounds : null;
+                if (!bounds || bounds.length !== 4) {
+                    throw new ArgumentError('Interactor response is missing bounds required to decode mask_rle');
+                }
+
+                const [left, top, right, bottom] = bounds;
+                const width = Math.max(1, (right - left) + 1);
+                const height = Math.max(1, (bottom - top) + 1);
+                const decoded = rle2Mask(response.mask_rle, width, height);
+                const mask: number[][] = [];
+                for (let row = 0; row < height; row++) {
+                    mask.push(decoded.slice(row * width, (row + 1) * width));
+                }
+                response.mask = mask;
+            }
+
+            if (!response.mask) {
+                throw new ArgumentError('Interactor response does not include mask data');
+            }
+
+            return response;
         },
     });
 

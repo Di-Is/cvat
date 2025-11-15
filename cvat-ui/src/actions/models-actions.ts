@@ -7,7 +7,9 @@ import { ActionUnion, createAction, ThunkAction } from 'utils/redux';
 import {
     ActiveInference, ModelsQuery,
 } from 'reducers';
-import { getCore, MLModel, RQStatus } from 'cvat-core-wrapper';
+import {
+    getCore, MLModel, ModelProviders, RQStatus, SerializedFunction,
+} from 'cvat-core-wrapper';
 import { filterNull } from 'utils/filter-null';
 
 export enum ModelsActionTypes {
@@ -101,15 +103,66 @@ export type ModelsActions = ActionUnion<typeof modelsActions>;
 
 const core = getCore();
 
+function convertNativeFunction(nativeFunction: SerializedFunction): MLModel {
+    return new MLModel({
+        id: nativeFunction.id,
+        name: nativeFunction.name,
+        description: nativeFunction.description,
+        kind: nativeFunction.kind,
+        provider: ModelProviders.NATIVE,
+        supported_shape_types: nativeFunction.supported_shape_types,
+        labels_v2: nativeFunction.labels_v2 as unknown as MLModel['labels'],
+        version: nativeFunction.version,
+        help_message: nativeFunction.help_message,
+        animated_gif: nativeFunction.animated_gif,
+        min_pos_points: nativeFunction.min_pos_points,
+        min_neg_points: nativeFunction.min_neg_points,
+        startswith_box: nativeFunction.startswith_box,
+        startswith_box_optional: nativeFunction.startswith_box_optional,
+        created_date: nativeFunction.created_at,
+        updated_date: nativeFunction.updated_at,
+    });
+}
+
 export function getModelsAsync(query?: ModelsQuery): ThunkAction {
     return async (dispatch, getState): Promise<void> => {
         dispatch(modelsActions.getModels(query));
 
         const filteredQuery = filterNull(query || getState().models.query);
         try {
-            const result = await core.lambda.list(filteredQuery);
-            const { models, count } = result;
-            dispatch(modelsActions.getModelsSuccess(models, count));
+            const [lambdaResult, nativeResult] = await Promise.allSettled([
+                core.lambda.list(filteredQuery),
+                core.functions.list({ page_size: 'all' }),
+            ]);
+
+            const combinedModels: MLModel[] = [];
+            let totalCount = 0;
+            const errors: any[] = [];
+
+            if (lambdaResult.status === 'fulfilled') {
+                combinedModels.push(...lambdaResult.value.models);
+                totalCount += lambdaResult.value.count;
+            } else if (lambdaResult.status === 'rejected') {
+                errors.push(lambdaResult.reason);
+            }
+
+            if (nativeResult.status === 'fulfilled') {
+                const nativeFunctions: SerializedFunction[] = nativeResult.value.results || [];
+                const nativeModels = nativeFunctions.map(convertNativeFunction);
+                combinedModels.push(...nativeModels);
+                const nativeCount = typeof nativeResult.value.count === 'number' ?
+                    nativeResult.value.count :
+                    nativeModels.length;
+                totalCount += nativeCount;
+            } else if (nativeResult.status === 'rejected') {
+                errors.push(nativeResult.reason);
+            }
+
+            if (!combinedModels.length && errors.length) {
+                throw errors[0];
+            }
+
+            dispatch(modelsActions.getModelsSuccess(combinedModels, totalCount));
         } catch (error) {
             dispatch(modelsActions.getModelsFailed(error));
         }

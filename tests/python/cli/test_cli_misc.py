@@ -11,8 +11,17 @@ from pathlib import Path
 from unittest import mock
 
 import packaging.version as pv
+import PIL.Image
 import pytest
-from cvat_cli._internal.agent import _Event, _NewReconnectionDelay, _parse_event_stream
+import cvat_sdk.auto_annotation as cvataa
+from cvat_cli._internal.agent import (
+    _Event,
+    _InteractorFunctionContextImpl,
+    _NewReconnectionDelay,
+    _parse_event_stream,
+    _serialize_mask_prediction,
+    _worker_job_interact,
+)
 from cvat_sdk import Client
 from cvat_sdk.api_client import ApiClient
 from cvat_sdk.api_client import models
@@ -210,6 +219,84 @@ class TestCliMisc(TestCliBase):
         )
 
         assert "Running native function agents requires the native functions API" in caplog.text
+
+    def test_create_native_interactor_function(self, monkeypatch):
+        function_file = Path(__file__).with_name("interactor_function.py")
+        created_payloads: list[dict[str, object]] = []
+        original_call_api = ApiClient.call_api
+
+        def fake_call_api(self, resource_path, method, *args, **kwargs):
+            if resource_path == "/api/functions" and method == "POST":
+                created_payloads.append(kwargs.get("body", {}))
+            return original_call_api(self, resource_path, method, *args, **kwargs)
+
+        monkeypatch.setattr(ApiClient, "call_api", fake_call_api)
+
+        stdout = self.run_cli(
+            "function",
+            "create-native",
+            "sam2-interactor",
+            "--function-file",
+            str(function_file),
+        )
+
+        assert created_payloads
+        payload = created_payloads[-1]
+        assert payload["kind"] == "interactor"
+        assert payload["min_pos_points"] == 2
+        assert payload["min_neg_points"] == 0
+        assert payload["startswith_box"] is True
+        assert payload["startswith_box_optional"] is False
+        assert payload["help_message"] == "Sample interactor"
+        assert payload["animated_gif"].endswith("demo.gif")
+        assert payload["version"] == 2
+
+        function_id = int(stdout.strip().splitlines()[-1])
+        try:
+            self.client.api_client.call_api(
+                "/api/functions/{function_id}",
+                "DELETE",
+                path_params={"function_id": function_id},
+            )
+        except ApiException:
+            pass
+
+    def test_worker_job_interact_serializes_prediction(self):
+        import cvat_cli._internal.agent as agent_module
+
+        class _DummyInteractor:
+            spec = cvataa.InteractorFunctionSpec()
+
+            def interact(self, context, image, prompt):
+                assert context.task_id == 7
+                assert prompt.positive_points
+                mask = [[1, 0], [0, 1]]
+                return cvataa.MaskPrediction(
+                    mask=mask,
+                    bounds=[0, 0, 2, 2],
+                    points=[(0.0, 0.0)],
+                )
+
+        original_function = getattr(agent_module, "_current_function", None)
+        agent_module._current_function = _DummyInteractor()
+        try:
+            context = _InteractorFunctionContextImpl(
+                task_id=7,
+                job_id=3,
+                frame_index=5,
+                job_frame_index=1,
+                frame_name="frame_000001.jpg",
+            )
+            prompt = cvataa.InteractionPrompt(positive_points=[(0.0, 0.0)])
+            image = PIL.Image.new("RGB", (2, 2), color="white")
+            prediction = _worker_job_interact(context, image, prompt)
+            payload = _serialize_mask_prediction(prediction)
+        finally:
+            agent_module._current_function = original_function
+
+        assert payload["mask"] == [[1, 0], [0, 1]]
+        assert payload["bounds"] == [0, 0, 2, 2]
+        assert payload["points"] == [[0.0, 0.0]]
 
 
 @pytest.mark.parametrize(

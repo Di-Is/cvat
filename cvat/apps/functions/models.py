@@ -29,6 +29,13 @@ class Function(models.Model):
     )
     kind = models.CharField(max_length=32, choices=FunctionKind.choices)
     supported_shape_types = models.JSONField(default=list, blank=True)
+    min_pos_points = models.IntegerField(default=1)
+    min_neg_points = models.IntegerField(default=-1)
+    startswith_box = models.BooleanField(default=False)
+    startswith_box_optional = models.BooleanField(default=False)
+    help_message = models.TextField(blank=True, default="")
+    animated_gif = models.TextField(blank=True, default="")
+    version = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

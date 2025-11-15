@@ -1946,6 +1946,20 @@ async function runFunctionTrackerAction(jobId: number, functionId: number, body)
     }
 }
 
+async function runFunctionInteractorAction(jobId: number, functionId: number, body) {
+    const { backendAPI } = config;
+
+    try {
+        const response = await Axios.post(
+            `${backendAPI}/jobs/${jobId}/functions/${functionId}/interactions`,
+            body,
+        );
+        return response.data;
+    } catch (errorData) {
+        throw generateError(errorData);
+    }
+}
+
 async function installedApps() {
     const { backendAPI } = config;
     try {
@@ -2574,6 +2588,7 @@ export default Object.freeze({
         validationLayout: validationLayout('jobs'),
         mergeConsensusJobs,
         runTrackerAction: runFunctionTrackerAction,
+        runInteractorAction: runFunctionInteractorAction,
     }),
 
     users: Object.freeze({

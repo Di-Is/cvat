@@ -30,6 +30,13 @@ class FunctionSerializer(serializers.ModelSerializer):
     supported_shape_types = serializers.ListField(
         child=serializers.CharField(), required=False, allow_empty=True, default=list
     )
+    min_pos_points = serializers.IntegerField(min_value=0, required=False)
+    min_neg_points = serializers.IntegerField(required=False)
+    startswith_box = serializers.BooleanField(required=False)
+    startswith_box_optional = serializers.BooleanField(required=False)
+    help_message = serializers.CharField(required=False, allow_blank=True)
+    animated_gif = serializers.CharField(required=False, allow_blank=True)
+    version = serializers.IntegerField(min_value=1, required=False)
 
     class Meta:
         model = Function
@@ -40,6 +47,13 @@ class FunctionSerializer(serializers.ModelSerializer):
             "provider",
             "kind",
             "supported_shape_types",
+            "min_pos_points",
+            "min_neg_points",
+            "startswith_box",
+            "startswith_box_optional",
+            "help_message",
+            "animated_gif",
+            "version",
             "labels_v2",
             "created_at",
             "updated_at",
@@ -67,6 +81,17 @@ class FunctionSerializer(serializers.ModelSerializer):
 
         if kind == FunctionKind.DETECTOR and not has_labels:
             raise serializers.ValidationError({"labels_v2": "Detection functions require labels."})
+
+        if kind == FunctionKind.INTERACTOR:
+            min_pos = attrs.get("min_pos_points", getattr(self.instance, "min_pos_points", 0))
+            min_neg = attrs.get("min_neg_points", getattr(self.instance, "min_neg_points", -1))
+            if min_neg is not None and min_neg < -1:
+                raise serializers.ValidationError({"min_neg_points": "Value must be >= -1."})
+            if min_pos is not None and min_pos < 0:
+                raise serializers.ValidationError({"min_pos_points": "Value must be >= 0."})
+            version = attrs.get("version", getattr(self.instance, "version", 1))
+            if version is not None and version < 1:
+                raise serializers.ValidationError({"version": "Version must be positive."})
         return super().validate(attrs)
 
     def validate_labels_v2(self, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -182,6 +207,51 @@ class TrackingActionRequestSerializer(serializers.Serializer):
 class TrackingActionResponseSerializer(serializers.Serializer):
     run_id = serializers.CharField()
     initial_request_id = serializers.CharField()
+
+
+class _PointField(serializers.ListField):
+    def __init__(self, **kwargs):
+        super().__init__(
+            child=serializers.FloatField(),
+            min_length=2,
+            max_length=2,
+            allow_empty=False,
+            **kwargs,
+        )
+
+
+class InteractorActionRequestSerializer(serializers.Serializer):
+    frame = serializers.IntegerField(min_value=0)
+    pos_points = serializers.ListField(child=_PointField(), allow_empty=False)
+    neg_points = serializers.ListField(child=_PointField(), allow_empty=True, required=False, default=list)
+    obj_bbox = serializers.ListField(
+        child=_PointField(),
+        allow_empty=False,
+        required=False,
+        allow_null=True,
+    )
+    label_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)
+    start_with_box = serializers.BooleanField(required=False, default=False)
+
+    def validate_obj_bbox(self, value: list[list[float]] | None) -> list[list[float]] | None:
+        if value in (None, []):
+            return None
+        return value
+
+
+class InteractorActionResponseSerializer(serializers.Serializer):
+    mask = serializers.ListField(
+        child=serializers.ListField(child=serializers.IntegerField()),
+        required=False,
+    )
+    mask_rle = serializers.ListField(child=serializers.IntegerField(), required=False)
+    bounds = serializers.ListField(child=serializers.IntegerField(), min_length=4, max_length=4, required=False)
+    points = serializers.ListField(child=_PointField(), required=False)
+
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        if "mask" not in attrs and "mask_rle" not in attrs:
+            raise serializers.ValidationError("Result payload must include a mask or mask_rle field.")
+        return super().validate(attrs)
 
 
 def serialize_assignment(ar: AnnotationRequest | None) -> dict[str, Any] | None:

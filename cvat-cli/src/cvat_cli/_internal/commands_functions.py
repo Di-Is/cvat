@@ -14,6 +14,7 @@ from cvat_sdk.exceptions import ApiException
 
 from .agent import (
     FUNCTION_KIND_DETECTOR,
+    FUNCTION_KIND_INTERACTOR,
     FUNCTION_KIND_TRACKER,
     FUNCTION_PROVIDER_NATIVE,
     run_agent,
@@ -97,6 +98,17 @@ class FunctionCreateNative:
         elif isinstance(spec, cvataa.TrackingFunctionSpec):
             remote_function["kind"] = FUNCTION_KIND_TRACKER
             remote_function["supported_shape_types"] = sorted(spec.supported_shape_types)
+        elif isinstance(spec, cvataa.InteractorFunctionSpec):
+            remote_function["kind"] = FUNCTION_KIND_INTERACTOR
+            remote_function.update(
+                min_pos_points=spec.min_pos_points,
+                min_neg_points=spec.min_neg_points,
+                startswith_box=spec.startswith_box,
+                startswith_box_optional=spec.startswith_box_optional,
+                help_message=spec.help_message,
+                animated_gif=spec.animated_gif,
+                version=spec.version,
+            )
         else:
             raise cvataa.BadFunctionError(f"Unsupported function spec type: {type(spec).__name__}")
 

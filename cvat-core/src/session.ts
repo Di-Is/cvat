@@ -21,6 +21,7 @@ import {
     SerializedCollection, SerializedJob,
     SerializedLabel, SerializedTask,
 } from './server-response-types';
+import type { InteractorResults } from './lambda-manager';
 import AnnotationGuide from './guide';
 import { FrameData, FramesMetaData } from './frames';
 import Statistics from './statistics';
@@ -510,6 +511,15 @@ export interface FunctionTrackerRunResult {
     initialRequestId: string;
 }
 
+export interface FunctionInteractorRunParams {
+    frame: number;
+    posPoints: number[][];
+    negPoints?: number[][];
+    objBBox?: number[][] | null;
+    labelId?: number | null;
+    startWithBox?: boolean;
+}
+
 export class Job extends Session {
     #data: {
         id?: number;
@@ -782,6 +792,19 @@ export class Job extends Session {
             payload,
         );
         return result as FunctionTrackerRunResult;
+    }
+
+    async runFunctionInteractor(
+        functionId: number,
+        payload: FunctionInteractorRunParams,
+    ): Promise<InteractorResults> {
+        const result = await PluginRegistry.apiWrapper.call(
+            this,
+            Job.prototype.runFunctionInteractor,
+            functionId,
+            payload,
+        );
+        return result as InteractorResults;
     }
 }
 
