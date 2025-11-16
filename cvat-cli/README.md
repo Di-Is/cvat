@@ -27,6 +27,14 @@ The following subcommands are supported:
   - `delete` - delete a function
   - `run-agent` - process requests for a native function
 
+### Tracker agents
+
+`cvat-cli function run-agent` accepts tracker-specific cache tuning flags.  
+`--tracker-preload-chunks` downloads image chunks for each task before SAM2
+tracking, drastically reducing per-frame latency when the task uses image sets.
+Combine it with `--max-cache-tasks-with-chunks` / `--max-cache-tasks-without-chunks`
+to bound disk usage while still taking advantage of shared `TaskDataset` caches.
+
 ## Installation
 
 `pip install cvat-cli`

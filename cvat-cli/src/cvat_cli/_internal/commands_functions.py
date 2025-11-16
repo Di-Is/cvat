@@ -186,6 +186,11 @@ class FunctionRunAgent:
             default=10,
             help="maximum number of tasks cached without downloaded chunks",
         )
+        parser.add_argument(
+            "--tracker-preload-chunks",
+            action="store_true",
+            help="download tracker task media chunks when possible to speed up frame access",
+        )
 
     def execute(
         self,
@@ -196,6 +201,7 @@ class FunctionRunAgent:
         burst: bool,
         max_cache_tasks_with_chunks: int,
         max_cache_tasks_without_chunks: int,
+        tracker_preload_chunks: bool,
     ) -> None:
         run_agent(
             client,
@@ -204,4 +210,5 @@ class FunctionRunAgent:
             burst=burst,
             max_tasks_with_chunks=max_cache_tasks_with_chunks,
             max_tasks_without_chunks=max_cache_tasks_without_chunks,
+            tracker_allow_chunk_preload=tracker_preload_chunks,
         )

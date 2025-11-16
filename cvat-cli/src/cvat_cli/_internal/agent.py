@@ -19,6 +19,7 @@ from collections.abc import Generator, Iterator, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+import enum
 
 import attrs
 import cvat_sdk.auto_annotation as cvataa
@@ -295,13 +296,18 @@ class _TaskCacheLimiter:
     we don't want the dataset cache to keep growing.
     """
 
+    class _CacheOwner(enum.Enum):
+        TRACKER = "tracker"
+        INTERACTOR = "interactor"
+        OTHER = "other"
+
     def __init__(
         self,
         client: Client,
         *,
         max_tasks_with_chunks: int = 1,
         max_tasks_without_chunks: int = 10,
-        on_task_evicted: Callable[[int, bool], None] | None = None,
+        on_task_evicted: Callable[[int, bool, "._CacheOwner"], None] | None = None,
     ) -> None:
         self._client = client
         self._cache_manager = make_cache_manager(client, cvatds.UpdatePolicy.IF_MISSING_OR_STALE)
@@ -317,7 +323,11 @@ class _TaskCacheLimiter:
 
     @contextlib.contextmanager
     def using_cache_for_task(
-        self, task_id: int, *, with_chunks: bool
+        self,
+        task_id: int,
+        *,
+        with_chunks: bool,
+        owner: "_TaskCacheLimiter._CacheOwner" = _CacheOwner.OTHER,
     ) -> Generator[None, None, None]:
         if task_id in self._task_ids_in_use:
             yield
@@ -343,7 +353,7 @@ class _TaskCacheLimiter:
 
         if len(cached_task_ids) + len(self._task_ids_in_use) > max_cached_tasks:
             evicted_task_id = cached_task_ids.pop(0)
-            self._delete_task_cache(evicted_task_id, with_chunks=with_chunks)
+            self._delete_task_cache(evicted_task_id, with_chunks=with_chunks, owner=owner)
 
         try:
             yield
@@ -351,26 +361,32 @@ class _TaskCacheLimiter:
             self._task_ids_in_use.remove(task_id)
             cached_task_ids.append(task_id)
 
-    def _delete_task_cache(self, task_id: int, *, with_chunks: bool) -> None:
+    def _delete_task_cache(
+        self,
+        task_id: int,
+        *,
+        with_chunks: bool,
+        owner: "_TaskCacheLimiter._CacheOwner",
+    ) -> None:
         self._client.logger.info("Deleting task %d from the cache to make room...", task_id)
         shutil.rmtree(self._cache_manager.task_dir(task_id), ignore_errors=True)
         if self._on_task_evicted:
-            self._on_task_evicted(task_id, with_chunks)
+            self._on_task_evicted(task_id, with_chunks, owner)
 
 
-class _InteractorDatasetRepository:
+class _DatasetRepositoryBase:
     def __init__(self, client: Client) -> None:
         self._client = client
         self._datasets: dict[int, cvatds.TaskDataset] = {}
         self._lock = threading.Lock()
 
-    def get(self, task_id: int) -> cvatds.TaskDataset:
+    def get(self, task_id: int, **kwargs) -> cvatds.TaskDataset:
         with self._lock:
             dataset = self._datasets.get(task_id)
             if dataset:
                 return dataset
 
-        dataset = self._build_dataset(task_id)
+        dataset = self._build_dataset(task_id, **kwargs)
 
         with self._lock:
             self._datasets[task_id] = dataset
@@ -381,7 +397,12 @@ class _InteractorDatasetRepository:
         with self._lock:
             self._datasets.pop(task_id, None)
 
-    def _build_dataset(self, task_id: int) -> cvatds.TaskDataset:
+    def _build_dataset(self, task_id: int, **_) -> cvatds.TaskDataset:
+        raise NotImplementedError
+
+
+class _InteractorDatasetRepository(_DatasetRepositoryBase):
+    def _build_dataset(self, task_id: int, **_) -> cvatds.TaskDataset:
         start_ts = time.perf_counter()
         try:
             dataset = cvatds.TaskDataset(
@@ -406,6 +427,45 @@ class _InteractorDatasetRepository:
                 load_annotations=False,
                 media_download_policy=cvatds.MediaDownloadPolicy.FETCH_FRAMES_ON_DEMAND,
             )
+
+
+class _TrackerDatasetRepository(_DatasetRepositoryBase):
+    def get(self, task_id: int, *, allow_chunks: bool = False) -> cvatds.TaskDataset:
+        return super().get(task_id, allow_chunks=allow_chunks)
+
+    def _build_dataset(self, task_id: int, **kwargs) -> cvatds.TaskDataset:
+        allow_chunks = kwargs.get("allow_chunks", False)
+        start_ts = time.perf_counter()
+        if allow_chunks:
+            try:
+                dataset = cvatds.TaskDataset(
+                    self._client,
+                    task_id,
+                    load_annotations=False,
+                    media_download_policy=cvatds.MediaDownloadPolicy.PRELOAD_ALL,
+                )
+                elapsed = time.perf_counter() - start_ts
+                self._client.logger.info(
+                    "Preloaded tracker dataset for task %d (%.2fs)", task_id, elapsed
+                )
+                return dataset
+            except UnsupportedDatasetError:
+                self._client.logger.warning(
+                    "Task %d does not support tracker chunk preloading; falling back to on-demand frames",
+                    task_id,
+                )
+
+        dataset = cvatds.TaskDataset(
+            self._client,
+            task_id,
+            load_annotations=False,
+            media_download_policy=cvatds.MediaDownloadPolicy.FETCH_FRAMES_ON_DEMAND,
+        )
+        elapsed = time.perf_counter() - start_ts
+        self._client.logger.info(
+            "Prepared tracker dataset for task %d (%.2fs)", task_id, elapsed
+        )
+        return dataset
 
 
 def _parse_event_stream(
@@ -516,6 +576,7 @@ class _Agent:
         *,
         max_tasks_with_chunks: int = 1,
         max_tasks_without_chunks: int = 10,
+        tracker_allow_chunk_preload: bool = False,
     ):
         self._rng = random.Random()  # nosec
 
@@ -540,6 +601,8 @@ class _Agent:
         self._client.logger.info("Agent starting with ID %r", self._agent_id)
 
         self._interactor_datasets = _InteractorDatasetRepository(self._client)
+        self._tracker_datasets = _TrackerDatasetRepository(self._client)
+        self._tracker_allow_chunk_preload = tracker_allow_chunk_preload
         self._task_cache_limiter = _TaskCacheLimiter(
             client,
             max_tasks_with_chunks=max_tasks_with_chunks,
@@ -565,12 +628,24 @@ class _Agent:
         # Once we're successful, we'll rely on the server to set a new reconnection delay.
         self._queue_reconnection_delay = _POLLING_INTERVAL_MEAN_RARE
 
-    def _handle_task_cache_evicted(self, task_id: int, with_chunks: bool) -> None:
-        if with_chunks:
+    def _handle_task_cache_evicted(
+        self,
+        task_id: int,
+        with_chunks: bool,
+        owner: _TaskCacheLimiter._CacheOwner,
+    ) -> None:
+        if owner == _TaskCacheLimiter._CacheOwner.INTERACTOR:
             self._client.logger.info(
                 "Evicting cached preloaded dataset for task %d", task_id
             )
             self._interactor_datasets.discard(task_id)
+        elif owner == _TaskCacheLimiter._CacheOwner.TRACKER:
+            self._client.logger.info(
+                "Evicting cached tracker dataset for task %d", task_id
+            )
+            self._tracker_datasets.discard(task_id)
+        else:
+            self._client.logger.info("Cache eviction completed for task %d", task_id)
 
     def _validate_function_compatibility(self, remote_function: dict) -> None:
         function_id = remote_function["id"]
@@ -947,7 +1022,11 @@ class _Agent:
 
     def _calculate_result_for_detection_ar(self, ar_id: str, ar_params) -> dict[str, Any]:
         if ar_params["type"] == "annotate_task":
-            with self._task_cache_limiter.using_cache_for_task(ar_params["task"], with_chunks=True):
+            with self._task_cache_limiter.using_cache_for_task(
+                ar_params["task"],
+                with_chunks=True,
+                owner=_TaskCacheLimiter._CacheOwner.INTERACTOR,
+            ):
                 return self._calculate_result_for_annotate_task_ar(ar_id, ar_params)
         elif ar_params["type"] == "annotate_frame":
             with self._task_cache_limiter.using_cache_for_task(
@@ -1034,21 +1113,30 @@ class _Agent:
         return {"annotations": models.PatchedLabeledDataRequest(tags=tags, shapes=shapes)}
 
     def _calculate_result_for_tracking_ar(self, ar_id: str, ar_params) -> dict[str, Any]:
+        allow_chunks = self._tracker_allow_chunk_preload
         if ar_params["type"] == "init_tracking":
             with self._task_cache_limiter.using_cache_for_task(
-                ar_params["task"], with_chunks=False
+                ar_params["task"],
+                with_chunks=allow_chunks,
+                owner=_TaskCacheLimiter._CacheOwner.TRACKER,
             ):
                 return self._calculate_result_for_init_tracking_ar(ar_id, ar_params)
         elif ar_params["type"] == "track":
             with self._task_cache_limiter.using_cache_for_task(
-                ar_params["task"], with_chunks=False
+                ar_params["task"],
+                with_chunks=allow_chunks,
+                owner=_TaskCacheLimiter._CacheOwner.TRACKER,
             ):
                 return self._calculate_result_for_track_ar(ar_id, ar_params)
         else:
             raise _BadArError(f"unsupported type: {ar_params['type']!r}")
 
     def _calculate_result_for_init_tracking_ar(self, ar_id: str, ar_params) -> dict[str, Any]:
-        sample, _ = self._get_sample_from_ar_params(ar_params)
+        dataset = self._tracker_datasets.get(
+            ar_params["task"],
+            allow_chunks=self._tracker_allow_chunk_preload,
+        )
+        sample, _ = self._get_sample_from_ar_params(ar_params, dataset=dataset)
 
         def convert_shape(shape: dict) -> cvataa.TrackableShape:
             if shape["type"] not in self._function_spec.supported_shape_types:
@@ -1069,7 +1157,11 @@ class _Agent:
         return {"states": states}
 
     def _calculate_result_for_track_ar(self, ar_id: str, ar_params) -> dict[str, Any]:
-        sample, _ = self._get_sample_from_ar_params(ar_params)
+        dataset = self._tracker_datasets.get(
+            ar_params["task"],
+            allow_chunks=self._tracker_allow_chunk_preload,
+        )
+        sample, _ = self._get_sample_from_ar_params(ar_params, dataset=dataset)
 
         states = ar_params["states"]
         shapes = self._executor.result(
@@ -1088,7 +1180,9 @@ class _Agent:
             raise _BadArError(f"unsupported type: {ar_params['type']!r}")
 
         with self._task_cache_limiter.using_cache_for_task(
-            ar_params["task"], with_chunks=True
+            ar_params["task"],
+            with_chunks=True,
+            owner=_TaskCacheLimiter._CacheOwner.INTERACTOR,
         ):
             dataset = self._interactor_datasets.get(ar_params["task"])
             sample, _ = self._get_sample_from_ar_params(ar_params, dataset=dataset)
@@ -1156,6 +1250,7 @@ def run_agent(
     burst: bool,
     max_tasks_with_chunks: int = 1,
     max_tasks_without_chunks: int = 10,
+    tracker_allow_chunk_preload: bool = False,
 ) -> None:
     with (
         _RecoverableExecutor(
@@ -1174,6 +1269,7 @@ def run_agent(
                 function_id,
                 max_tasks_with_chunks=max_tasks_with_chunks,
                 max_tasks_without_chunks=max_tasks_without_chunks,
+                tracker_allow_chunk_preload=tracker_allow_chunk_preload,
             )
         except ApiException as exc:
             raise_if_functions_api_missing(exc, action="Running native function agents")

@@ -29,7 +29,8 @@ Use the existing pattern: imperative subject plus scope and PR reference (`Fix a
   2. ルートで `UV_HTTP_TIMEOUT=120 uv sync --group dev --group test --python 3.10` を実行し、`.venv` を構築します。
   3. `uv run python manage.py test --keepdb <test-label>` で Django テストを実行します。既存の `test_cvat` DB が残っている場合は `--keepdb` を指定するか、外部ツールで drop してください。
   4. SAM2 tracker の局所検証は `uv run python manage.py test --keepdb cvat.apps.functions.tests.test_api.FunctionsApiTests.test_tracker_action_appends_outside_keyframe_after_target cvat.apps.functions.tests.test_api.FunctionsApiTests.test_tracker_action_removes_existing_shapes_beyond_target` を推奨します。
-- サーバーのエンドポイント 192.168.10.190:8080 です。
+- サーバーのエンドポイント 192.168.10.190:8080 です。アクセス時にはヘッダー'Host: 192.168.10.190'の付与してください。
 - ルートユーザーの資格情報は admin:admin です。
 - SAM2はInteractorとTrackerに導入しようとしています。
 - TrackerはPolygonかMaskオブジェクトを指定し、Run annotation Actionから呼び出します。
+- Interactor/TrackerはGPU実行を仮定し、RTX 4080(VRAM 16GB)を使用する仮定で作業を行う。
