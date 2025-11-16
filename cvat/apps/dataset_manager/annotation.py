@@ -1090,9 +1090,12 @@ class TrackManager(ObjectManager):
                 if included_frames is None or i in included_frames
             ]
 
+        def _shape_order_key(shape: dict) -> tuple[int, bool]:
+            return (shape["frame"], bool(shape.get("outside")))
+
         shapes = []
         prev_shape: dict | None = None
-        for shape in sorted(track["shapes"], key=lambda shape: shape["frame"]):
+        for shape in sorted(track["shapes"], key=_shape_order_key):
             curr_frame = shape["frame"]
             if curr_frame in deleted_frames:
                 continue
@@ -1118,22 +1121,24 @@ class TrackManager(ObjectManager):
 
                 break  # The track finishes here
 
+            same_frame = bool(prev_shape) and curr_frame == prev_shape["frame"]
             if prev_shape:
-                if curr_frame == prev_shape["frame"] and dict(
-                    shape, id=None, keyframe=None
-                ) == dict(prev_shape, id=None, keyframe=None):
+                if same_frame and dict(shape, id=None, keyframe=None) == dict(
+                    prev_shape, id=None, keyframe=None
+                ):
                     continue
-                assert (
-                    curr_frame > prev_shape["frame"]
-                ), f"{curr_frame} > {prev_shape['frame']}. Track id: {track['id']}"  # Catch invalid tracks
+                if not same_frame:
+                    assert (
+                        curr_frame > prev_shape["frame"]
+                    ), f"{curr_frame} > {prev_shape['frame']}. Track id: {track['id']}"  # Catch invalid tracks
 
-                # Propagate attributes
-                for attr in prev_shape["attributes"]:
-                    if attr["spec_id"] not in (el["spec_id"] for el in shape["attributes"]):
-                        shape["attributes"].append(faster_deepcopy(attr))
+                    # Propagate attributes
+                    for attr in prev_shape["attributes"]:
+                        if attr["spec_id"] not in (el["spec_id"] for el in shape["attributes"]):
+                            shape["attributes"].append(faster_deepcopy(attr))
 
-                if not prev_shape["outside"] or include_outside:
-                    shapes.extend(interpolate(prev_shape, shape))
+                    if not prev_shape["outside"] or include_outside:
+                        shapes.extend(interpolate(prev_shape, shape))
 
             shape["keyframe"] = True
             shapes.append(shape)

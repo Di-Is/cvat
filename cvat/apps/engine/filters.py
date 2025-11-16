@@ -72,8 +72,12 @@ class OrderingFilter(filters.OrderingFilter):
 
     def get_ordering(self, request: ExtendedRequest, queryset, view):
         ordering = []
+        base_ordering = super().get_ordering(request, queryset, view)
+        if not base_ordering:
+            return []
+
         lookup_fields = self._get_lookup_fields(request, queryset, view)
-        for term in super().get_ordering(request, queryset, view):
+        for term in base_ordering:
             flag = ""
             if term.startswith(self.reverse_flag):
                 flag = self.reverse_flag

@@ -552,6 +552,11 @@ export interface SerializedFunctionRunStatus {
     completed_requests: number;
 }
 
+export interface SerializedFunctionRunCancelResponse {
+    run_id: string;
+    cancelled_requests: number;
+}
+
 export interface SerializedFramesMetaData {
     chunk_size: number;
     deleted_frames: number[];

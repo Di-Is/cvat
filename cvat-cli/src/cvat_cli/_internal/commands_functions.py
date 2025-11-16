@@ -174,6 +174,18 @@ class FunctionRunAgent:
             action="store_true",
             help="process all pending requests and then exit",
         )
+        parser.add_argument(
+            "--max-cache-tasks-with-chunks",
+            type=int,
+            default=1,
+            help="maximum number of tasks whose media chunks may be cached locally",
+        )
+        parser.add_argument(
+            "--max-cache-tasks-without-chunks",
+            type=int,
+            default=10,
+            help="maximum number of tasks cached without downloaded chunks",
+        )
 
     def execute(
         self,
@@ -182,5 +194,14 @@ class FunctionRunAgent:
         function_id: int,
         function_loader: FunctionLoader,
         burst: bool,
+        max_cache_tasks_with_chunks: int,
+        max_cache_tasks_without_chunks: int,
     ) -> None:
-        run_agent(client, function_loader, function_id, burst=burst)
+        run_agent(
+            client,
+            function_loader,
+            function_id,
+            burst=burst,
+            max_tasks_with_chunks=max_cache_tasks_with_chunks,
+            max_tasks_without_chunks=max_cache_tasks_without_chunks,
+        )

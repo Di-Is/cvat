@@ -1,0 +1,2 @@
+[env]
+COMPOSE_PROFILES = "sam2-agent"

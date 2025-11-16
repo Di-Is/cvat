@@ -75,6 +75,7 @@ class AnnotationRequestStatus(models.TextChoices):
     RUNNING = "running", _("Running")
     DONE = "done", _("Done")
     FAILED = "failed", _("Failed")
+    CANCELLED = "cancelled", _("Cancelled")
 
 
 class AnnotationRequestCategory(models.TextChoices):

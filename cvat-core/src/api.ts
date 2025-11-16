@@ -301,6 +301,10 @@ function build(): CVATCore {
                     const result = await PluginRegistry.apiWrapper(cvat.functions.runs.get, runId);
                     return result;
                 },
+                async cancel(runId: string) {
+                    const result = await PluginRegistry.apiWrapper(cvat.functions.runs.cancel, runId);
+                    return result;
+                },
             },
         },
         logger,

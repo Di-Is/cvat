@@ -184,9 +184,18 @@ class AnnotationRequestFailureSerializer(serializers.Serializer):
 class TrackingActionRequestSerializer(serializers.Serializer):
     frame = serializers.IntegerField(min_value=0)
     target_frame = serializers.IntegerField(min_value=0)
+    conversion_mode = serializers.ChoiceField(choices=["inline", "preconvert"], default="inline")
     track_ids = serializers.ListField(
         child=serializers.IntegerField(min_value=1),
-        allow_empty=False,
+        allow_empty=True,
+        required=False,
+        default=list,
+    )
+    shapes = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        allow_empty=True,
+        default=list,
     )
 
     def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
@@ -200,6 +209,23 @@ class TrackingActionRequestSerializer(serializers.Serializer):
         track_ids = attrs["track_ids"]
         if len(track_ids) != len(set(track_ids)):
             raise serializers.ValidationError({"track_ids": "Track ids must be unique."})
+
+        shapes = attrs.get("shapes", [])
+        for index, shape in enumerate(shapes):
+            if shape.get("frame") != frame:
+                raise serializers.ValidationError(
+                    {"shapes": f"Shape #{index} is not on frame {frame}."}
+                )
+            points = shape.get("points") or []
+            if len(points) % 2:
+                raise serializers.ValidationError(
+                    {"shapes": f"Shape #{index} points must include an even number of coordinates."}
+                )
+
+        if not track_ids and not shapes:
+            raise serializers.ValidationError(
+                {"track_ids": "At least one track or shape must be provided for tracking."}
+            )
 
         return attrs
 

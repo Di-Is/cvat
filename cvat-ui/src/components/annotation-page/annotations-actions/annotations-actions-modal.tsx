@@ -26,7 +26,7 @@ import { createAction, ActionUnion } from 'utils/redux';
 import { getCVATStore } from 'cvat-store';
 import {
     BaseCollectionAction, BaseAction, Job, getCore,
-    ObjectState, ActionParameterType,
+    ObjectState, ActionParameterType, TrackerConversionMode,
 } from 'cvat-core-wrapper';
 import { Canvas } from 'cvat-canvas-wrapper';
 import { fetchAnnotationsAsync } from 'actions/annotation-actions';
@@ -34,6 +34,33 @@ import { clamp } from 'utils/math';
 import NativeFunctionTrackerAction from './native-function-action';
 
 const core = getCore();
+const CONVERSION_MODE_STORAGE_KEY = 'cvat:tracker:sam2:conversion_mode';
+const DEFAULT_CONVERSION_MODE: TrackerConversionMode = 'inline';
+
+function loadStoredConversionMode(): TrackerConversionMode {
+    if (typeof window === 'undefined') {
+        return DEFAULT_CONVERSION_MODE;
+    }
+
+    try {
+        const stored = window.localStorage.getItem(CONVERSION_MODE_STORAGE_KEY);
+        return stored === 'preconvert' ? 'preconvert' : DEFAULT_CONVERSION_MODE;
+    } catch {
+        return DEFAULT_CONVERSION_MODE;
+    }
+}
+
+function persistConversionMode(mode: TrackerConversionMode): void {
+    if (typeof window === 'undefined') {
+        return;
+    }
+
+    try {
+        window.localStorage.setItem(CONVERSION_MODE_STORAGE_KEY, mode);
+    } catch {
+        // ignore storage failures
+    }
+}
 
 interface State {
     actions: BaseAction[];
@@ -315,11 +342,27 @@ function AnnotationsActionsModalContent(props: Props): JSX.Element {
         actions, activeAction, fetching, targetObjectState, cancelled,
         progress, progressMessage, frameFrom, frameTo, actionParameters, modalVisible,
     } = useSelector((state: State) => ({ ...state }), shallowEqual);
+    const [conversionMode, setConversionMode] = useState<TrackerConversionMode>(() => loadStoredConversionMode());
 
     const filteredActions = targetObjectState ? actions
         .filter((_action) => _action.isApplicableForObject(targetObjectState)) : actions;
     const jobInstance = storage.getState().annotation.job.instance as Job;
     const currentFrameAction = activeAction instanceof BaseCollectionAction || targetObjectState !== null;
+
+    useEffect(() => {
+        if (activeAction instanceof NativeFunctionTrackerAction) {
+            activeAction.setConversionMode(conversionMode);
+        }
+    }, [activeAction, conversionMode]);
+
+    const handleConversionModeChange = (checked: boolean): void => {
+        const nextMode: TrackerConversionMode = checked ? 'preconvert' : 'inline';
+        setConversionMode(nextMode);
+        persistConversionMode(nextMode);
+        if (activeAction instanceof NativeFunctionTrackerAction) {
+            activeAction.setConversionMode(nextMode);
+        }
+    };
 
     useEffect(() => {
         async function initializeActions(): Promise<void> {
@@ -564,6 +607,32 @@ function AnnotationsActionsModalContent(props: Props): JSX.Element {
                     </Col>
                 ) : null}
 
+                {activeAction instanceof NativeFunctionTrackerAction ? (
+                    <Col span={24} className='cvat-action-runner-action-parameters'>
+                        <Row>
+                            <Col span={24}>
+                                <Text strong>Tracker shape handling </Text>
+                                <hr />
+                            </Col>
+                            <Col span={24} className='cvat-action-runner-action-parameter'>
+                                <Switch
+                                    checked={conversionMode === 'preconvert'}
+                                    onChange={handleConversionModeChange}
+                                />
+                                <Text className='cvat-text-color' style={{ marginLeft: 8 }}>
+                                    Convert shapes to tracks before running
+                                </Text>
+                            </Col>
+                            <Col span={24}>
+                                <Text type='secondary'>
+                                    Inline mode auto-saves selected shapes before tracking. Preconvert keeps Undo/Redo
+                                    available by creating tracks locally.
+                                </Text>
+                            </Col>
+                        </Row>
+                    </Col>
+                ) : null}
+
                 {fetching && typeof progress === 'number' && (
                     <Col span={24}>
                         <Progress percent={progress} className='cvat-action-runner-progress' />
@@ -587,13 +656,13 @@ function AnnotationsActionsModalContent(props: Props): JSX.Element {
                             }
                         }}
                     >
-                        { fetching ? 'Cancel' : 'Close'}
+                        { fetching ? (cancelled ? 'Cancelling...' : 'Cancel') : 'Close'}
                     </Button>
                     <Button
                         className='cvat-action-runner-run-btn'
                         type='primary'
                         loading={fetching}
-                        disabled={!activeAction || fetching}
+                        disabled={!activeAction || fetching || cancelled}
                         onClick={() => {
                             const appState = storage.getState();
                             const canvasInstance = appState.annotation.canvas.instance as Canvas;

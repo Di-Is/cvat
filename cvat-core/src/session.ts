@@ -31,6 +31,7 @@ import Issue from './issue';
 import ObjectState from './object-state';
 import { JobValidationLayout, TaskValidationLayout } from './validation-layout';
 import { UpdateStatusData } from './core-types';
+import { TrackerConversionMode, TrackerRunShapePayload } from './api-interfaces';
 
 function buildDuplicatedAPI(prototype) {
     Object.defineProperties(prototype, {
@@ -503,7 +504,9 @@ type InitializerType = Readonly<Partial<Omit<SerializedJob, 'labels'> & { labels
 export interface FunctionTrackerRunParams {
     frame: number;
     targetFrame: number;
-    trackIds: number[];
+    trackIds?: number[];
+    shapes?: TrackerRunShapePayload[];
+    conversionMode?: TrackerConversionMode;
 }
 
 export interface FunctionTrackerRunResult {

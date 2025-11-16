@@ -220,6 +220,71 @@ class TestCliMisc(TestCliBase):
 
         assert "Running native function agents requires the native functions API" in caplog.text
 
+    def test_run_agent_accepts_cache_limits(self, monkeypatch):
+        import cvat_cli._internal.agent as agent_module
+
+        captured: dict[str, int | bool] = {}
+
+        def fake_run_agent(*args, **kwargs):
+            captured["burst"] = kwargs["burst"]
+            captured["max_with"] = kwargs["max_tasks_with_chunks"]
+            captured["max_without"] = kwargs["max_tasks_without_chunks"]
+
+        monkeypatch.setattr(agent_module, "run_agent", fake_run_agent)
+        function_file = Path(__file__).with_name("example_function.py")
+
+        self.run_cli(
+            "function",
+            "run-agent",
+            "2",
+            "--function-file",
+            str(function_file),
+            "--max-cache-tasks-with-chunks",
+            "3",
+            "--max-cache-tasks-without-chunks",
+            "7",
+        )
+
+        assert captured["burst"] is False
+        assert captured["max_with"] == 3
+        assert captured["max_without"] == 7
+
+    def test_interactor_dataset_repository_caches(self, monkeypatch):
+        import logging
+        import types
+        import cvat_cli._internal.agent as agent_module
+
+        created: list[int] = []
+
+        class DummyDataset:
+            def __init__(
+                self,
+                client,
+                task_id,
+                load_annotations=False,
+                media_download_policy=None,
+            ):
+                created.append(task_id)
+                self.samples = []
+                self.labels = []
+
+        monkeypatch.setattr(agent_module.cvtads, "TaskDataset", DummyDataset)
+
+        client = types.SimpleNamespace(logger=logging.getLogger("cvat_cli.test"))
+        repo = agent_module._InteractorDatasetRepository(client)
+
+        first = repo.get(10)
+        second = repo.get(10)
+
+        assert first is second
+        assert created == [10]
+
+        repo.discard(10)
+        third = repo.get(10)
+
+        assert third is not first
+        assert created == [10, 10]
+
     def test_create_native_interactor_function(self, monkeypatch):
         function_file = Path(__file__).with_name("interactor_function.py")
         created_payloads: list[dict[str, object]] = []
@@ -297,6 +362,55 @@ class TestCliMisc(TestCliBase):
         assert payload["mask"] == [[1, 0], [0, 1]]
         assert payload["bounds"] == [0, 0, 2, 2]
         assert payload["points"] == [[0.0, 0.0]]
+
+    def test_worker_tracking_supports_polygon_and_mask_inputs(self):
+        import cvat_cli._internal.agent as agent_module
+
+        class _DummyTracker:
+            spec = cvataa.TrackingFunctionSpec(supported_shape_types={"polygon", "mask"})
+
+            def preprocess_image(self, context, image):
+                return image
+
+            def init_tracking_state(self, context, pp_image, shape):
+                assert context.original_shape_type == shape.type
+                return {"type": shape.type, "points": list(shape.points)}
+
+            def track(self, context, pp_image, state):
+                assert context.original_shape_type == state["type"]
+                return cvataa.TrackableShape(
+                    type=state["type"],
+                    points=[value + 1 for value in state["points"]],
+                )
+
+        original_function = getattr(agent_module, "_current_function", None)
+        original_states = getattr(agent_module, "_tracking_states", None)
+        original_generator = getattr(agent_module, "_tracking_state_id_generator", None)
+        agent_module._current_function = _DummyTracker()
+        agent_module._tracking_states = agent_module._TrackingStateContainer()
+        id_iter = iter(["polygon-state", "mask-state"])
+        agent_module._tracking_state_id_generator = lambda: next(id_iter)
+
+        state_ids: list[str] = []
+        predictions: list[cvataa.TrackableShape | None] = []
+        image = PIL.Image.new("RGB", (6, 6), color="white")
+        shapes = [
+            cvataa.TrackableShape(type="polygon", points=[0.0, 0.0, 1.0, 1.0, 2.0, 2.0]),
+            cvataa.TrackableShape(type="mask", points=[1.0, 0.0, 1.0, 0.0]),
+        ]
+
+        try:
+            state_ids = agent_module._worker_job_init_tracking(11, image, shapes)
+            predictions = agent_module._worker_job_track(11, image, state_ids)
+        finally:
+            agent_module._current_function = original_function
+            agent_module._tracking_states = original_states
+            agent_module._tracking_state_id_generator = original_generator
+
+        assert state_ids == ["polygon-state", "mask-state"]
+        assert [shape.type for shape in predictions] == ["polygon", "mask"]
+        assert predictions[0] is not None and predictions[0].points[0] == shapes[0].points[0] + 1
+        assert predictions[1] is not None and predictions[1].points[0] == shapes[1].points[0] + 1
 
 
 @pytest.mark.parametrize(

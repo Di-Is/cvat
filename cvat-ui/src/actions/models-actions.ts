@@ -11,6 +11,7 @@ import {
     getCore, MLModel, ModelProviders, RQStatus, SerializedFunction,
 } from 'cvat-core-wrapper';
 import { filterNull } from 'utils/filter-null';
+import { settlePromise } from 'utils/settle-promises';
 
 export enum ModelsActionTypes {
     GET_MODELS = 'GET_MODELS',
@@ -130,9 +131,9 @@ export function getModelsAsync(query?: ModelsQuery): ThunkAction {
 
         const filteredQuery = filterNull(query || getState().models.query);
         try {
-            const [lambdaResult, nativeResult] = await Promise.allSettled([
-                core.lambda.list(filteredQuery),
-                core.functions.list({ page_size: 'all' }),
+            const [lambdaResult, nativeResult] = await Promise.all([
+                settlePromise(core.lambda.list(filteredQuery)),
+                settlePromise(core.functions.list({ page_size: 'all' })),
             ]);
 
             const combinedModels: MLModel[] = [];

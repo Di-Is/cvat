@@ -21,3 +21,10 @@ In addition, you can add `-p device=str:<device>` to run the model on a specific
 such as `cuda`. By default, the model will be run on the CPU.
 
 All other parameters set with the `-p` option will be passed directly to the model constructor.
+
+## Dependencies
+
+The tracker and interactor share the same dependency set, which is defined via
+`pyproject.toml` / `uv.lock` inside `../interactor/sam2`. Run `uv sync` in that
+directory (or install the package with `uv pip install /workspace/ai-models/interactor/sam2`
+inside containers) to provision the required Python libraries.

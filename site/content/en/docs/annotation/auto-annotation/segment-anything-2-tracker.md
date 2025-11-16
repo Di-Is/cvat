@@ -34,7 +34,7 @@ Choose the installation method based on your platform and deployment needs.
 {{% alert title="Note" color="primary" %}}
 Nuclio SAM2 Tracker is only available in the Enterprise version.
 The AI agent variant works with CVAT Online, Enterprise, and OSS deployments that include the native
-functions API (CVAT 2.42.0 or later ships it by default, and docker compose now bundles an opt-in `sam2-agent` service).
+functions API (CVAT 2.42.0 or later ships it by default, and docker compose now bundles opt-in SAM2 agent services).
 {{% /alert %}}
 
 {{% alert title="Note" color="primary" %}}
@@ -107,7 +107,7 @@ for Enterprise customers. This approach runs the tracking model on user hardware
    export CVAT_ACCESS_TOKEN=<PAT_VALUE>
    ```
 
-   This variable is consumed by both the standalone CLI and the dockerized `sam2-agent` service. When using docker compose, add the same value to your `.env` file as `CVAT_AGENT_TOKEN`.
+   This variable is consumed by both the standalone CLI and the dockerized SAM2 agents. When using docker compose, add the same value to your `.env` file as `CVAT_AGENT_TOKEN`.
 
 1. Register the SAM2 function with CVAT:
    ```sh
@@ -135,47 +135,52 @@ for Enterprise customers. This approach runs the tracking model on user hardware
 - **GPU Support**: Add `-p device=str:cuda` to the agent command to use NVIDIA GPU acceleration
 - **Organization Sharing**: Add `--org <ORG_SLUG>` to both commands to share the function with your organization
 
-#### Running the agent inside docker compose (OSS)
+#### Running the agents inside docker compose (OSS)
 
-The root `docker-compose.yml` file now exposes an optional `sam2-agent` service under the `sam2-agent` profile.
-It keeps `function run-agent` online next to your OSS stack so you do not have to manage an extra terminal window.
+The root `docker-compose.yml` file now exposes two optional services (`sam2-tracker-agent` and `sam2-interactor-agent`) under the shared `sam2-agent` profile.
+They keep `function run-agent` online next to your OSS stack so you do not have to manage extra terminals for tracker and interactor scenarios.
 
 1. Update `.env` with the PAT and SAM2 options:
    ```dotenv
    CVAT_AGENT_TOKEN=<PAT_VALUE>
-   SAM2_FUNCTION_ID=<ID_FROM_CREATE_NATIVE>
-   SAM2_MODEL_ID=facebook/sam2.1-hiera-small
-   SAM2_DEVICE=cuda              # Set to cpu if you do not have an NVIDIA GPU
-   # Optional overrides
-   SAM2_FUNCTION_FILE=/workspace/ai-models/tracker/sam2/func.py
-   SAM2_AGENT_CVAT_URL=http://cvat_server:8080
-   SAM2_EXTRA_AGENT_ARGS="-p cache_dir=str:/tmp/sam2"
+   SAM2_AGENT_CVAT_URL=http://cvat-server:8080
+   SAM2_AGENT_GPU_COUNT=1
+
+   SAM2_TRACKER_FUNCTION_ID=<TRACKER_ID>
+   SAM2_TRACKER_MODEL_ID=facebook/sam2.1-hiera-small
+   SAM2_TRACKER_DEVICE=cuda
+   SAM2_TRACKER_EXTRA_AGENT_ARGS="-p cache_dir=str:/tmp/sam2"
+
+   SAM2_INTERACTOR_FUNCTION_ID=<INTERACTOR_ID>
+   SAM2_INTERACTOR_MODEL_ID=facebook/sam2.1-hiera-small
+   SAM2_INTERACTOR_DEVICE=cuda
+   SAM2_INTERACTOR_GPU_COUNT=1
    ```
 
-   - `CVAT_AGENT_TOKEN` is forwarded to the container as `CVAT_ACCESS_TOKEN`.
-   - `SAM2_MODEL_ID` is passed to `-p model_id=...`.
-   - `SAM2_FUNCTION_ID` must match the value printed by `function create-native`.
-   - `SAM2_EXTRA_AGENT_ARGS` lets you append additional CLI flags (space separated) if you need to forward more parameters to `func.py`.
+   - `CVAT_AGENT_TOKEN` is forwarded to the containers as `CVAT_ACCESS_TOKEN`.
+   - `SAM2_TRACKER_*` variables feed into `sam2-tracker-agent` (annotation actions).
+   - `SAM2_INTERACTOR_*` variables feed into `sam2-interactor-agent` (AI Tools interactor).
+   - Either agent accepts `SAM2_*_FUNCTION_FILE` and `SAM2_*_EXTRA_AGENT_ARGS` overrides if you need to forward extra CLI flags to `func.py`.
 
 1. Build the image the first time (or whenever you edit the CLI / SAM2 code):
    ```sh
-   docker compose --profile sam2-agent build sam2-agent
+   docker compose --profile sam2-agent build sam2-tracker-agent sam2-interactor-agent
    ```
 
-1. Start or restart the agent:
+1. Start or restart whichever agents you need:
    ```sh
-   docker compose --profile sam2-agent up -d sam2-agent
+   docker compose --profile sam2-agent up -d sam2-tracker-agent sam2-interactor-agent
    ```
 
 1. Inspect logs when you need to debug request handling:
    ```sh
-   docker compose logs -f sam2-agent
+   docker compose logs -f sam2-tracker-agent
+   docker compose logs -f sam2-interactor-agent
    ```
 
-The service mounts `ai-models/tracker/sam2` read-only along with `dev/sam2-agent/entrypoint.sh`,
-and caches Hugging Face downloads inside the persistent `sam2_agent_cache` volume.
-If your host does not provide an NVIDIA GPU, remove the `deploy.resources.reservations.devices`
-block from `docker-compose.yml` (or switch to the legacy `runtime: nvidia` stanza) and set `SAM2_DEVICE=cpu`.
+The services mount `ai-models/tracker/sam2` and `ai-models/interactor/sam2` read-only along with `dev/sam2-agent/entrypoint.sh`,
+and cache Hugging Face downloads inside the persistent `sam2_agent_cache` volume.
+If your host does not provide an NVIDIA GPU, remove (or comment out) the `deploy.resources.reservations.devices` block for the relevant service and set `SAM2_*_DEVICE=cpu`.
 
 #### Agent Behavior and Resilience
 

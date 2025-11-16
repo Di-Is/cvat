@@ -1214,6 +1214,7 @@ class TrackedShape(Shape):
     track = models.ForeignKey(LabeledTrack, on_delete=models.CASCADE,
         related_name='shapes', related_query_name='shape')
     frame = models.PositiveIntegerField()
+    function_run_id = models.UUIDField(null=True, blank=True, db_index=True)
 
 class TrackedShapeAttributeVal(AttributeVal):
     shape = models.ForeignKey(TrackedShape, on_delete=models.DO_NOTHING,

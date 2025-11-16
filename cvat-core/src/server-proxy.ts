@@ -1876,6 +1876,17 @@ async function getFunctionRunStatus(runId: string) {
     }
 }
 
+async function cancelFunctionRun(runId: string) {
+    const { backendAPI } = config;
+
+    try {
+        const response = await Axios.post(`${backendAPI}/functions/runs/${runId}/cancel`);
+        return response.data;
+    } catch (errorData) {
+        throw generateError(errorData);
+    }
+}
+
 async function runLambdaRequest(body) {
     const { backendAPI } = config;
 
@@ -2639,6 +2650,7 @@ export default Object.freeze({
         }),
         runs: Object.freeze({
             get: getFunctionRunStatus,
+            cancel: cancelFunctionRun,
         }),
     }),
 

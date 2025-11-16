@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 import { isEqual, cloneDeep } from 'lodash';
+import { isCrossOriginIsolated } from 'utils/window-guards';
 import { registerComponentShortcuts } from 'actions/shortcuts-actions';
 import { KeyMap, KeyMapItem } from './mousetrap-react';
 import { ShortcutScope } from './enums';
@@ -122,7 +123,9 @@ export function conflictDetector(
                 if (conflict(sequence, existingSequence)) {
                     const conflictingActions = Object.keys(flatKeyMapUpdated.items)
                         .filter((a) => flatKeyMapUpdated.items[a].sequences.includes(existingSequence));
-                    console.warn(`The shortcut: ${sequence} of ${label} have conflicts with these shortcuts: ${conflictingActions.join(', ')}`);
+                    if (!isCrossOriginIsolated()) {
+                        console.warn(`The shortcut: ${sequence} of ${label} have conflicts with these shortcuts: ${conflictingActions.join(', ')}`);
+                    }
                     conflictingActions.forEach((conflictingAction) => {
                         conflictingItems[conflictingAction] = flatKeyMapUpdated.items[conflictingAction];
                     });

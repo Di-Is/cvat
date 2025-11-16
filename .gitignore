@@ -16,6 +16,7 @@ __pycache__
 .coverage
 .husky/
 .python-version
+**/.python-version
 /tmp*cvat/
 /temp*/
 
@@ -50,6 +51,8 @@ yarn-error.log*
 node_modules
 /*env*/
 /.*env*
+**/.venv
+**/*.egg-info
 perfkit.egg-info/
 
 # Ignore all js dists

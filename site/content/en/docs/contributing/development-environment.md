@@ -238,39 +238,52 @@ _Go to System Settings_ → _General_ → _AirDrop & Handoff_ → _Untick Airpla
 You have done! Now it is possible to insert breakpoints and debug server and client of the tool.
 Instructions for running tests locally are available {{< ilink "/docs/contributing/running-tests" "here" >}}.
 
-### SAM2 tracker agent profile
+### SAM2 agent profile (tracker + interactor)
 
-The root `docker-compose.yml` file ships an optional `sam2-agent` profile so that local contributors can exercise the Segment Anything 2 tracker end-to-end without depending on CVAT Online.
+The root `docker-compose.yml` file ships an optional `sam2-agent` profile with two services so that local contributors can exercise both the Segment Anything 2 tracker and the SAM2.1 AI Tools interactor without depending on CVAT Online.
 
 1. Issue a Personal Access Token from the profile page (`Account` → `Access Tokens`) and keep the value for later use.
-2. Register the bundled SAM2 tracker once and note the returned function ID:
+2. Register the bundled SAM2 tracker and interactor once and record the IDs:
 
    ```bash
    cvat-cli --server-host=http://localhost --auth=<USER>:<PASS> \
      function create-native "AI Tracker: SAM2" \
      --function-file ai-models/tracker/sam2/func.py \
-      -p model_id=str:facebook/sam2.1-hiera-small \
+     -p model_id=str:facebook/sam2.1-hiera-small \
+     -p device=str:cuda
+
+   cvat-cli --server-host=http://localhost --auth=<USER>:<PASS> \
+     function create-native "AI Interactor: SAM2" \
+     --function-file ai-models/interactor/sam2/func.py \
+     -p model_id=str:facebook/sam2.1-hiera-small \
      -p device=str:cuda
    ```
-3. Append the following variables to your `.env` file at the repository root so the UI, CLI, and agent share the same context:
+3. Append the following variables to your `.env` file at the repository root so the UI, CLI, and agents share the same context:
 
    ```dotenv
    CVAT_AGENT_TOKEN=<PAT_FROM_STEP_1>
-   SAM2_FUNCTION_ID=<ID_FROM_STEP_2>
-  SAM2_MODEL_ID=facebook/sam2.1-hiera-small
-   SAM2_DEVICE=cuda  # switch to "cpu" on machines without NVIDIA GPUs
-   SAM2_AGENT_CVAT_URL=http://cvat_server:8080
+   SAM2_AGENT_CVAT_URL=http://cvat-server:8080
    SAM2_AGENT_GPU_COUNT=1
+
+   SAM2_TRACKER_FUNCTION_ID=<TRACKER_ID>
+   SAM2_TRACKER_MODEL_ID=facebook/sam2.1-hiera-small
+   SAM2_TRACKER_DEVICE=cuda  # switch to "cpu" on machines without NVIDIA GPUs
+
+   SAM2_INTERACTOR_FUNCTION_ID=<INTERACTOR_ID>
+   SAM2_INTERACTOR_MODEL_ID=facebook/sam2.1-hiera-small
+   SAM2_INTERACTOR_DEVICE=cuda
+   SAM2_INTERACTOR_GPU_COUNT=1
    ```
-4. Build and start the profile when you need hardware-accelerated tracking:
+4. Build and start the profile when you need hardware-accelerated tracking or interactive prompting:
 
    ```bash
-   docker compose --profile sam2-agent build sam2-agent
-   docker compose --profile sam2-agent up -d sam2-agent
-   docker compose logs -f sam2-agent
+   docker compose --profile sam2-agent build sam2-tracker-agent sam2-interactor-agent
+   docker compose --profile sam2-agent up -d sam2-tracker-agent sam2-interactor-agent
+   docker compose logs -f sam2-tracker-agent
+   docker compose logs -f sam2-interactor-agent
    ```
 
-   Set `SAM2_DEVICE=cpu` and remove the `device_requests` block (or set `SAM2_AGENT_GPU_COUNT=0` if your Docker version allows it) when GPUs are unavailable. See the [Segment Anything 2 tracker guide](/docs/annotation/auto-annotation/segment-anything-2-tracker/) for troubleshooting details.
+   Set `SAM2_*_DEVICE=cpu` and remove the corresponding `deploy.resources.reservations.devices` block when GPUs are unavailable. See the [Segment Anything 2 tracker guide](/docs/annotation/auto-annotation/segment-anything-2-tracker/) for troubleshooting details.
 
 ## Note for Windows users
 

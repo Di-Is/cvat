@@ -101,6 +101,15 @@ export default function implementAPI(cvat: CVATCore): CVATCore {
         return result;
     });
 
+    implementationMixin(cvat.functions.runs.cancel, async (runId: string) => {
+        if (!isString(runId)) {
+            throw new ArgumentError('Run id must be a string');
+        }
+
+        const result = await serverProxy.functions.runs.cancel(runId);
+        return result;
+    });
+
     implementationMixin(cvat.requests.list, requestsManager.list.bind(requestsManager));
     implementationMixin(cvat.requests.listen, requestsManager.listen.bind(requestsManager));
     implementationMixin(cvat.requests.cancel, requestsManager.cancel.bind(requestsManager));

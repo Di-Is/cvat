@@ -45,4 +45,9 @@ urlpatterns = [
         views.FunctionRunStatusView.as_view(),
         name="functions-run-status",
     ),
+    path(
+        "api/functions/runs/<uuid:run_id>/cancel",
+        views.FunctionRunCancelView.as_view(),
+        name="functions-run-cancel",
+    ),
 ]

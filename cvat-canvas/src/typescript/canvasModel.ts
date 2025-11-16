@@ -268,7 +268,7 @@ export interface CanvasModel {
     setup(frameData: any, objectStates: any[], zLayer: number): void;
     setupIssueRegions(issueRegions: Record<number, { hidden: boolean; points: number[] }>): void;
     activate(clientID: number | null, attributeID: number | null): void;
-    highlight(clientIDs: number[], severity: HighlightSeverity): void;
+    highlight(clientIDs: number[], severity: HighlightSeverity | null): void;
     rotate(rotationAngle: number): void;
     focus(clientID: number, padding: number): void;
     fit(): void;
@@ -342,7 +342,7 @@ function disableInternalSVGDrawing(data: DrawData | MasksEditData, currentData: 
     return !data.enabled && currentData.enabled &&
         (('shapeType' in currentData && currentData.shapeType === 'mask') ||
         ('state' in currentData && currentData.state.shapeType === 'mask')) &&
-        currentData.brushTool?.type?.startsWith('polygon-') &&
+        Boolean(currentData.brushTool?.type?.startsWith('polygon-')) &&
         hasShapeIsBeingDrawn();
 }
 
@@ -953,7 +953,7 @@ export class CanvasModelImpl extends MasterImpl implements CanvasModel {
             this.data.configuration.controlPointsSize = configuration.controlPointsSize;
         }
 
-        if (['auto', 'center'].includes(configuration.textPosition)) {
+        if (typeof configuration.textPosition === 'string' && ['auto', 'center'].includes(configuration.textPosition)) {
             this.data.configuration.textPosition = configuration.textPosition;
         }
 
@@ -1000,7 +1000,7 @@ export class CanvasModelImpl extends MasterImpl implements CanvasModel {
         if (['string', 'boolean'].includes(typeof configuration.outlinedBorders)) {
             this.data.configuration.outlinedBorders = configuration.outlinedBorders;
         }
-        if (Object.values(ColorBy).includes(configuration.colorBy)) {
+        if (typeof configuration.colorBy !== 'undefined' && Object.values(ColorBy).includes(configuration.colorBy)) {
             this.data.configuration.colorBy = configuration.colorBy;
         }
 
@@ -1092,7 +1092,10 @@ export class CanvasModelImpl extends MasterImpl implements CanvasModel {
 
     public get objects(): any[] {
         if (this.data.zLayer !== null) {
-            return this.data.objects.filter((object: any): boolean => object.zOrder <= this.data.zLayer);
+            const zLayer = this.data.zLayer;
+            return this.data.objects.filter(
+                (object: any): boolean => typeof object.zOrder === 'number' && object.zOrder <= zLayer,
+            );
         }
 
         return this.data.objects;
@@ -1157,7 +1160,7 @@ export class CanvasModelImpl extends MasterImpl implements CanvasModel {
     public get mode(): Mode {
         return this.data.mode;
     }
-    public get exception(): Error {
+    public get exception(): Error | null {
         return this.data.exception;
     }
 }

@@ -22,3 +22,14 @@ Use the existing pattern: imperative subject plus scope and PR reference (`Fix a
 
 ## Note
 - EnterpriseとOnlineのプランは利用しません。私との回答はOSS番に焦点を絞ってください。
+- pythonの環境構築はuvを使用してください。可能な限り`uv pip`は使用せず、`uv add/remove/lock/sync/run`のプロジェクト管理用のAPIを使用してください。pyproject.tomlやuv.lockが存在しない状態のpython環境を編集する際は最初にuvで再現可能な環境を構築してください。
+- Rust/GEOS/LDAPなどネイティブ依存が必要です。Debian/Ubuntuの場合は `sudo apt install build-essential libldap2-dev libsasl2-dev libgeos-dev`、RHEL系は対応パッケージを導入してください。Rustは `mise install rust` → `source ~/.cargo/env && rustup default <version>` でセットアップします。
+- Pythonテストを動かす手順:
+  1. `source ~/.cargo/env` で Rust PATH を有効化します。
+  2. ルートで `UV_HTTP_TIMEOUT=120 uv sync --group dev --group test --python 3.10` を実行し、`.venv` を構築します。
+  3. `uv run python manage.py test --keepdb <test-label>` で Django テストを実行します。既存の `test_cvat` DB が残っている場合は `--keepdb` を指定するか、外部ツールで drop してください。
+  4. SAM2 tracker の局所検証は `uv run python manage.py test --keepdb cvat.apps.functions.tests.test_api.FunctionsApiTests.test_tracker_action_appends_outside_keyframe_after_target cvat.apps.functions.tests.test_api.FunctionsApiTests.test_tracker_action_removes_existing_shapes_beyond_target` を推奨します。
+- サーバーのエンドポイント 192.168.10.190:8080 です。
+- ルートユーザーの資格情報は admin:admin です。
+- SAM2はInteractorとTrackerに導入しようとしています。
+- TrackerはPolygonかMaskオブジェクトを指定し、Run annotation Actionから呼び出します。

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import contextlib
 import threading
-import time
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -14,6 +13,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from cvat.apps.engine.models import Job, Label
 from cvat.apps.lambda_manager.models import FunctionKind
 
+from . import notifications, telemetry
 from .models import (
     AnnotationRequest,
     AnnotationRequestCategory,
@@ -50,7 +50,7 @@ if _MAX_WAIT_SLOTS > 0:
     _WAIT_SEMAPHORE = threading.BoundedSemaphore(_MAX_WAIT_SLOTS)
 
 
-def interactor_wait_slot():
+def interactor_wait_slot(*, timeout: float | None = None):
     """Return a context manager that reserves a wait slot if required."""
 
     if _WAIT_SEMAPHORE is None:
@@ -58,7 +58,7 @@ def interactor_wait_slot():
 
     @contextlib.contextmanager
     def _slot():
-        acquired = _WAIT_SEMAPHORE.acquire(blocking=False)
+        acquired = _WAIT_SEMAPHORE.acquire(timeout=timeout)
         if not acquired:
             raise InteractorWaitQueueBusy("Too many concurrent interactor waits")
         try:
@@ -156,20 +156,41 @@ def start_interactor_request(
 def wait_for_interactor_request(
     annotation_request: AnnotationRequest, *, timeout: timedelta
 ) -> dict[str, Any]:
-    poll_interval = min(1.0, max(0.1, timeout.total_seconds() / 60))
+    poll_interval = min(0.2, timeout.total_seconds())
     deadline = timezone.now() + timeout
+    request_id = str(annotation_request.id)
 
-    while True:
-        annotation_request.refresh_from_db()
-        status = annotation_request.status
-        if status == AnnotationRequestStatus.DONE:
-            return annotation_request.result or {}
-        if status == AnnotationRequestStatus.FAILED:
-            result_payload = annotation_request.result or {}
-            message = result_payload.get("exc_info") or "Interactor request failed."
-            raise InteractorRequestFailed(message)
+    with telemetry.traced(
+        "functions.wait_for_interactor_request",
+        request_id=request_id,
+        job_id=getattr(annotation_request, "job_id", None),
+    ) as span:
+        with notifications.request_listener(request_id) as listener:
+            while True:
+                annotation_request.refresh_from_db()
+                status = annotation_request.status
+                if status == AnnotationRequestStatus.DONE:
+                    if span:
+                        span.set_attribute("cvat.result_status", "done")
+                    return annotation_request.result or {}
+                if status == AnnotationRequestStatus.FAILED:
+                    if span:
+                        span.set_attribute("cvat.result_status", "failed")
+                    result_payload = annotation_request.result or {}
+                    message = result_payload.get("exc_info") or "Interactor request failed."
+                    raise InteractorRequestFailed(message)
+                if status == AnnotationRequestStatus.CANCELLED:
+                    if span:
+                        span.set_attribute("cvat.result_status", "cancelled")
+                    raise InteractorRequestFailed("Interactor request was cancelled.")
 
-        if timezone.now() >= deadline:
-            raise InteractorRequestTimeoutError("Timed out while waiting for interactor response")
+                remaining = (deadline - timezone.now()).total_seconds()
+                if remaining <= 0:
+                    if span:
+                        span.set_attribute("cvat.result_status", "timeout")
+                    raise InteractorRequestTimeoutError(
+                        "Timed out while waiting for interactor response"
+                    )
 
-        time.sleep(poll_interval)
+                wait_seconds = max(0.0, min(poll_interval, remaining))
+                listener.next_message(timeout=wait_seconds)

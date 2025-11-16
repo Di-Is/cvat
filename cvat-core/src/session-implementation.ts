@@ -641,20 +641,102 @@ export function implementJob(Job: typeof JobClass): typeof JobClass {
                 throw new ArgumentError('Frame and targetFrame must be integers');
             }
 
-            if (!Array.isArray(payload.trackIds) || payload.trackIds.length === 0) {
-                throw new ArgumentError('At least one track must be provided');
+            const conversionMode = (payload.conversionMode ?? 'inline').toLowerCase();
+            if (!['inline', 'preconvert'].includes(conversionMode)) {
+                throw new ArgumentError('Invalid tracker conversion mode');
             }
 
-            const trackIdsAreValid = payload.trackIds.every((trackId) => Number.isInteger(trackId) && trackId > 0);
-            if (!trackIdsAreValid) {
+            const trackIds = Array.isArray(payload.trackIds) ? payload.trackIds : [];
+            const normalizedTrackIds = trackIds.filter((trackId) => Number.isInteger(trackId) && trackId > 0);
+            if (trackIds.length && normalizedTrackIds.length !== trackIds.length) {
                 throw new ArgumentError('Track ids must be positive integers');
             }
 
-            const requestBody = {
+            const shapes = Array.isArray(payload.shapes) ? payload.shapes : [];
+            const normalizedShapes = shapes.map((shape, index) => {
+                if (!Number.isInteger(shape.clientId)) {
+                    throw new ArgumentError(`Shape ${index} must include a numeric clientId`);
+                }
+
+                if (shape.id !== null && typeof shape.id !== 'undefined' &&
+                    (!Number.isInteger(shape.id) || shape.id <= 0)) {
+                    throw new ArgumentError(`Shape ${index} id must be a positive integer or null`);
+                }
+
+                if (!Number.isInteger(shape.frame) || shape.frame < 0) {
+                    throw new ArgumentError(`Shape ${index} frame must be a non-negative integer`);
+                }
+
+                if (!Number.isInteger(shape.labelId) || shape.labelId <= 0) {
+                    throw new ArgumentError(`Shape ${index} labelId must be a positive integer`);
+                }
+
+                if (typeof shape.shapeType !== 'string' || !shape.shapeType.length) {
+                    throw new ArgumentError(`Shape ${index} must define a shapeType`);
+                }
+
+                if (!Array.isArray(shape.points)) {
+                    throw new ArgumentError(`Shape ${index} must include points array`);
+                }
+
+                const pointsAreValid = shape.points.every((value) => Number.isFinite(value));
+                if (!pointsAreValid) {
+                    throw new ArgumentError(`Shape ${index} points must contain only finite numbers`);
+                }
+
+                const attributes = Array.isArray(shape.attributes) ? shape.attributes : [];
+                const normalizedAttributes = attributes.map((attribute, attrIndex) => {
+                    if (!Number.isInteger(attribute.specId) || attribute.specId <= 0) {
+                        throw new ArgumentError(`Shape ${index} attribute ${attrIndex} has invalid specId`);
+                    }
+
+                    return {
+                        spec_id: attribute.specId,
+                        value: typeof attribute.value === 'undefined' || attribute.value === null ?
+                            '' : String(attribute.value),
+                    };
+                });
+
+                return {
+                    id: typeof shape.id === 'number' ? shape.id : null,
+                    client_id: shape.clientId,
+                    frame: shape.frame,
+                    label_id: shape.labelId,
+                    shape_type: shape.shapeType,
+                    points: shape.points,
+                    z_order: Number.isFinite(shape.zOrder) ? shape.zOrder : 0,
+                    rotation: Number.isFinite(shape.rotation) ? shape.rotation : 0,
+                    group: typeof shape.group === 'number' ? shape.group : null,
+                    occluded: Boolean(shape.occluded),
+                    outside: Boolean(shape.outside),
+                    source: shape.source,
+                    attributes: normalizedAttributes,
+                };
+            });
+
+            if (!normalizedTrackIds.length && !normalizedShapes.length) {
+                throw new ArgumentError('At least one track or shape must be provided');
+            }
+
+            const requestBody: {
+                frame: number;
+                target_frame: number;
+                conversion_mode: string;
+                track_ids?: number[];
+                shapes?: typeof normalizedShapes;
+            } = {
                 frame: payload.frame,
                 target_frame: payload.targetFrame,
-                track_ids: payload.trackIds,
+                conversion_mode: conversionMode,
             };
+
+            if (normalizedTrackIds.length) {
+                requestBody.track_ids = normalizedTrackIds;
+            }
+
+            if (normalizedShapes.length) {
+                requestBody.shapes = normalizedShapes;
+            }
 
             const response = await serverProxy.jobs.runTrackerAction(this.id, functionId, requestBody);
             return {

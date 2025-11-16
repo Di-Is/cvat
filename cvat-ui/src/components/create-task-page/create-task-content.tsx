@@ -22,6 +22,7 @@ import { getFileContentType, getContentTypeRemoteFile, getFileNameFromPath } fro
 
 import { FrameSelectionMethod } from 'components/create-job-page/job-form';
 import { formFieldsError } from 'utils/validation';
+import { waitForAll } from 'utils/settle-promises';
 import BasicConfigurationForm, { BaseConfiguration } from './basic-configuration-form';
 import ProjectSearchField from './project-search-field';
 import ProjectSubsetField from './project-subset-field';
@@ -609,7 +610,7 @@ class CreateTaskContent extends React.PureComponent<Props & RouteComponentProps,
                     await this.createOneOfMultiTasks(index - 1);
                 }
             });
-        await Promise.allSettled(promises);
+        await waitForAll(promises);
         this.stopLoading();
     };
 

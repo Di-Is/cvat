@@ -78,7 +78,7 @@
 5. **動作確認・ドキュメント**: docker compose + agent の手動動作確認を実施し、再現手順を README / docs にまとめる。自動テストは DRF の最小ケースに限定する。
 
 ### ローカル運用補足
-- `sam2-agent` は compose サービスとして追加し、`ai-models/tracker/sam2` ディレクトリを bind mount。GPU 有効化は `docker-compose.yml` の `device_requests`（`driver: nvidia`, `capabilities: [gpu]`, `SAM2_AGENT_GPU_COUNT`）で行い、追加の `deploy.resources` や `runtime: nvidia` 記載は不要。
+- `sam2-agent` は compose サービスとして追加し、`ai-models/tracker/sam2` ディレクトリを bind mount。GPU 有効化は `deploy.resources.reservations.devices`（`driver: nvidia`, `capabilities: [gpu]`, `SAM2_AGENT_GPU_COUNT`）を使い、追加の `runtime: nvidia` 記載は不要。
 - 認証は PAT 1 つを `.env` に記載し、UI/CLI/agent で共通利用する。自動ローテーションや複雑な権限管理は行わない。
 - ログは `cvat-cli function run-agent` の INFO/ERROR をそのまま標準出力へ流し、必要に応じて `docker compose logs sam2-agent` を確認する（追加の JSON 出力は行わない）。
 
@@ -123,10 +123,31 @@
 ### 進捗メモ (2025-11-11 / CLI & Compose)
 - `cvat-cli` の `function create-native` / `function run-agent` で `/api/functions` が無いサーバーに接続した場合は `CriticalError` を投げ、ユーザーへ「CVAT 2.42+ へ更新 or `cvat.apps.functions` を有効化」が必要である旨を明示するようにした。
 - `Dockerfile.sam2-agent`（`pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime` ベース）と `dev/sam2-agent/entrypoint.sh` を追加し、`docker-compose.yml` に `profiles: [sam2-agent]` な `sam2-agent` サービスを組み込んだ。`SAM2_MODEL_ID` / `SAM2_FUNCTION_ID` / `SAM2_DEVICE` / `SAM2_AGENT_CVAT_URL` / `SAM2_EXTRA_AGENT_ARGS` など環境変数で CLI コマンドをパラメータ化し、Hugging Face キャッシュ用の `sam2_agent_cache` ボリュームも追加済み。
-- `.env` に `CVAT_AGENT_TOKEN`（PAT）を置けば CLI / コンテナ両方が共有し、GPU 非搭載環境では `SAM2_DEVICE=cpu` にした上で `sam2-agent` サービスの `device_requests` ブロックをコメントアウト（または `SAM2_AGENT_GPU_COUNT=0` を指定）すればよい旨をドキュメントに記載。
+- `.env` に `CVAT_AGENT_TOKEN`（PAT）を置けば CLI / コンテナ両方が共有し、GPU 非搭載環境では `SAM2_DEVICE=cpu` にした上で `deploy.resources.reservations.devices` ブロックをコメントアウト（または `SAM2_AGENT_GPU_COUNT=0` を指定する）ことをドキュメントに記載。
 - `site/content/en/docs/annotation/auto-annotation/segment-anything-2-tracker.md` に OSS 手順（ PAT 発行・`sam2-agent` プロファイル起動・環境変数サンプル）を追加し、`site/content/en/docs/api_sdk/cli/_index.md` の注意書きを「CVAT Online/Enterprise + OSS 2.42+」向けに更新した。
 
 ### 進捗メモ (2025-11-14 / Docs, CLI, CI)
 - README と `site/content/en/docs/contributing/development-environment.md` に `sam2-agent` プロファイル用の `.env` サンプル、PAT 取得、`docker compose --profile sam2-agent` コマンドの最小手順を追記し、ローカル開発者が OSS で SAM2 トラッカーを起動できるようにした。
 - `tests/python/cli/test_cli_misc.py` へ `function create-native` / `function run-agent` の `/api/functions` 欠落時シナリオを追加し、`ApiClient.call_api` が 404/405 を返した場合に `raise_if_functions_api_missing` が `CriticalError` を出すことを回帰テストで担保。
 - `.github/workflows/main.yml` の CI `build` ジョブに `Dockerfile.sam2-agent` をビルドするステップを追加し、依存バージョン更新時にも agent イメージが壊れていないことを検証。
+
+## SAM2.1 Interactor E2E 手動検証ログ (WIP)
+- 詳細手順とログテンプレは `tasks/sam2_interactor_e2e.md` に切り出し。GPU 環境での再現が必要。
+- 2025-11-15 時点で実施できた項目
+  - `uv run --with cvat-cli` で Tracker/Interactor 関数を作成し、ID=1/2 を `.env` にセット。
+  - compose で `sam2-*-agent` を起動すると `cvat-cli: not found` で再起動し続ける（pyproject に CLI を含める必要あり）。現状はホスト側で未リリース CLI/SKD を `PYTHONPATH` で読み込ませ、`function run-agent 2` を `nohup` で常駐させて代替。
+  - REST `POST /api/jobs/{job}/functions/{function}/interactions` は `filters.py`（OrderingFilter の None ガード）と `permissions.py`（`function_interactions` → `UPDATE_ANNOTATIONS` スコープ）のホットパッチ後に 200 応答。`ai-models/interactor/sam2/func.py` では `torch.Tensor`→NumPy bool 変換を追加して `mask_rle` が戻ることを確認。
+  - エージェントログ `/tmp/sam2_interactor_agent.log` に `AR '... completed'` が残り、server log もマスク応答を返した。UI (AI Tools) の手動確認とスクリーンキャプチャは未実施。
+- 前提: docker compose で `sam2-agent` プロファイルを有効化し、`SAM2_TRACKER_*` / `SAM2_INTERACTOR_*` の Function ID を `.env` へ記録済み。GPU 共有や CPU fallback は `SAM2_*_DEVICE` を `cpu` にするほか、`docker-compose.yml` 側の `deploy.resources.reservations.devices` ブロックをコメントアウトして調整する。
+- CLI / agent 操作は `uv tool install cvat-cli` で CLI を取得し、PAT (`CVAT_AGENT_TOKEN`) を `~/.config/cvat-cli` か `.env` に保存して使い回す。ローカルで repo ルートから実行する際は `UV_PROJECT_ENV=.venv` をセットして `uv run` を呼ぶ。
+
+| Status | 手順 | コマンド / 操作 | ログ / 備考 |
+| --- | --- | --- | --- |
+| TODO | Function 登録 (tracker) | `UV_PROJECT_ENV=.venv uv run --with cvat-cli python -m cvat_cli --server-host http://localhost --auth <USER>:<PASS> function create-native "AI Tracker: SAM2" --function-file ai-models/tracker/sam2/func.py -p model_id=str:facebook/sam2.1-hiera-small -p device=str:cuda` | 返却 ID を `SAM2_TRACKER_FUNCTION_ID` へ追記。`--auth` の代わりに `--auth-token "$CVAT_AGENT_TOKEN"` でも可。 |
+| TODO | Function 登録 (interactor) | `UV_PROJECT_ENV=.venv uv run --with cvat-cli python -m cvat_cli --server-host http://localhost --auth <USER>:<PASS> function create-native "AI Interactor: SAM2" --function-file ai-models/interactor/sam2/func.py -p model_id=str:facebook/sam2.1-hiera-small -p device=str:cuda` | ID を `SAM2_INTERACTOR_FUNCTION_ID` に記録。`ai-models/interactor/sam2/README.md` の入力制約 (正点2個以上 etc.) を CLI からも確認。 |
+| BLOCKED (GPU 不足) | agent サービス起動 | `docker compose --profile sam2-agent build sam2-tracker-agent sam2-interactor-agent && docker compose --profile sam2-agent up -d sam2-tracker-agent sam2-interactor-agent` | 現在の開発端末には NVIDIA GPU が無く、`nvidia-container-cli: initialization error` で停止するため未実施。GPU ノード確保後に着手。 |
+| PENDING | agent ログ確認 | `docker compose logs -f sam2-interactor-agent` | `SAM2_FUNCTION_ID` 未設定や PAT 不備時の失敗ログを収集予定。 |
+| TODO | CLI -> agent -> REST 動作確認 | `UV_PROJECT_ENV=.venv uv run --with cvat-cli python -m cvat_cli --auth-token "$CVAT_AGENT_TOKEN" function run-agent $SAM2_INTERACTOR_FUNCTION_ID --function-file ai-models/interactor/sam2/func.py -p model_id=str:facebook/sam2.1-hiera-small` | SSE で `REQUEST_CATEGORY_INTERACTIVE` が最優先で割当されること、`mask_rle` が返送されることを Jenkins GPU ノードで確認予定。 |
+| TODO | UI からの操作 | 任意ジョブを開き、AI Tools -> Interactors で `SAM2.1 Interactor (Native)` を選択。正/負点と box を入力して応答マスクが可視化されるか、Undo/Redo で履歴が残るかを画面録画。 | 録画 + CLI ログを次回更新時に本ログへ添付。 |
+
+備考: ローカル (CPU) での compose 実行は GPU ブロックを無効化すれば起動までは可能だが、SAM2.1 モデルの初回ダウンロード&推論に 10GB 超の VRAM と長時間を要する。OSS 検証向けには GPU ノード上の `sam2-agent` プロファイルで上記手順を完了させ、SSE ログと UI キャプチャをこのテーブルに記載する。

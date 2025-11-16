@@ -13,6 +13,7 @@ x-backend-env: &backend-env
   CVAT_REDIS_ONDISK_PORT: 6666
   CVAT_LOG_IMPORT_ERRORS: 'true'
   CVAT_ALLOW_STATIC_CACHE: '${CVAT_ALLOW_STATIC_CACHE:-no}'
+  CVAT_SERVERLESS: '${CVAT_SERVERLESS:-no}'
   DJANGO_LOG_SERVER_HOST: vector
   DJANGO_LOG_SERVER_PORT: 8282
   no_proxy: clickhouse,grafana,vector,nuclio,opa,${no_proxy:-}
@@ -246,11 +247,11 @@ services:
     networks:
       - cvat
 
-  sam2-agent:
-    container_name: sam2-agent
+  sam2-tracker-agent:
+    container_name: sam2-tracker-agent
     build:
       context: .
-      dockerfile: Dockerfile.sam2-agent
+      dockerfile: ai-models/tracker/sam2/Dockerfile
     profiles:
       - sam2-agent
     restart: unless-stopped
@@ -259,23 +260,62 @@ services:
         condition: service_started
     environment:
       CVAT_ACCESS_TOKEN: ${CVAT_AGENT_TOKEN:-}
-      CVAT_URL: ${SAM2_AGENT_CVAT_URL:-http://cvat_server:8080}
-      SAM2_MODEL_ID: ${SAM2_MODEL_ID:-facebook/sam2.1-hiera-small}
-      SAM2_DEVICE: ${SAM2_DEVICE:-cuda}
-      SAM2_FUNCTION_ID: ${SAM2_FUNCTION_ID:-}
-      SAM2_EXTRA_AGENT_ARGS: ${SAM2_EXTRA_AGENT_ARGS:-}
-      SAM2_FUNCTION_FILE: ${SAM2_FUNCTION_FILE:-/workspace/ai-models/tracker/sam2/func.py}
+      CVAT_URL: ${SAM2_AGENT_CVAT_URL:-http://cvat-server:8080}
+      SAM2_MODEL_ID: ${SAM2_TRACKER_MODEL_ID:-facebook/sam2.1-hiera-small}
+      SAM2_DEVICE: ${SAM2_TRACKER_DEVICE:-cuda}
+      SAM2_FUNCTION_ID: ${SAM2_TRACKER_FUNCTION_ID:-}
+      SAM2_EXTRA_AGENT_ARGS: ${SAM2_TRACKER_EXTRA_AGENT_ARGS:-}
+      SAM2_FUNCTION_FILE: ${SAM2_TRACKER_FUNCTION_FILE:-/workspace/src/ai-models/tracker/sam2/func.py}
       HF_HOME: /var/cache/huggingface
     volumes:
-      - ./ai-models/tracker/sam2:/workspace/ai-models/tracker/sam2:ro
+      - ./ai-models/tracker/sam2:/workspace/src/ai-models/tracker/sam2:ro
       - ./dev/sam2-agent:/workspace/dev/sam2-agent:ro
       - sam2_agent_cache:/var/cache/huggingface
     command: ["/workspace/dev/sam2-agent/entrypoint.sh"]
-    device_requests:
-      - driver: nvidia
-        count: ${SAM2_AGENT_GPU_COUNT:-1}
-        capabilities:
-          - gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${SAM2_AGENT_GPU_COUNT:-1}
+              capabilities:
+                - gpu
+    networks:
+      - cvat
+
+  sam2-interactor-agent:
+    container_name: sam2-interactor-agent
+    build:
+      context: .
+      dockerfile: ai-models/interactor/sam2/Dockerfile
+    profiles:
+      - sam2-agent
+    restart: unless-stopped
+    depends_on:
+      cvat_server:
+        condition: service_started
+    environment:
+      CVAT_ACCESS_TOKEN: ${CVAT_AGENT_TOKEN:-}
+      CVAT_URL: ${SAM2_AGENT_CVAT_URL:-http://cvat-server:8080}
+      SAM2_MODEL_ID: ${SAM2_INTERACTOR_MODEL_ID:-facebook/sam2.1-hiera-small}
+      SAM2_DEVICE: ${SAM2_INTERACTOR_DEVICE:-cuda}
+      SAM2_FUNCTION_ID: ${SAM2_INTERACTOR_FUNCTION_ID:-}
+      SAM2_EXTRA_AGENT_ARGS: ${SAM2_INTERACTOR_EXTRA_AGENT_ARGS:-}
+      SAM2_FUNCTION_FILE: ${SAM2_INTERACTOR_FUNCTION_FILE:-/workspace/src/ai-models/interactor/sam2/func.py}
+      HF_HOME: /var/cache/huggingface
+    volumes:
+      - ./ai-models/interactor/sam2:/workspace/src/ai-models/interactor/sam2:ro
+      - ./dev/sam2-agent:/workspace/dev/sam2-agent:ro
+      - sam2_agent_cache:/var/cache/huggingface
+    command: ["/workspace/dev/sam2-agent/entrypoint.sh"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${SAM2_INTERACTOR_GPU_COUNT:-1}
+              capabilities:
+                - gpu
     networks:
       - cvat
 

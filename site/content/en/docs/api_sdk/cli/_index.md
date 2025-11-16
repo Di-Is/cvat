@@ -381,7 +381,7 @@ see that command's examples for more information.
 
 **Note**: The functionality described in this section relies on the native functions API (`/api/functions`).
 It is available on CVAT Online, CVAT Enterprise, and on self-hosted CVAT OSS deployments starting with version 2.42.0 (make sure the `cvat.apps.functions` Django app is enabled).
-For docker compose users, the bundled `sam2-agent` service described in the
+For docker compose users, the bundled SAM2 agent services described in the
 {{< ilink "/docs/annotation/auto-annotation/segment-anything-2-tracker" "SAM2 tracker guide" >}}
 keeps a CLI agent online inside your stack.
 

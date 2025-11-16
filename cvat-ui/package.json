@@ -6,6 +6,8 @@
   "scripts": {
     "build": "webpack --config ./webpack.config.js",
     "start": "webpack serve --env API_URL=http://localhost:7000 --config ./webpack.config.js --mode=development",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "type-check": "tsc --noEmit",
     "type-check:watch": "yarn run type-check --watch",
     "lint": "eslint './src/**/*.{ts,tsx}'",
@@ -66,5 +68,12 @@
     "redux-devtools-extension": "^2.13.9",
     "redux-logger": "^4.0.0",
     "redux-thunk": "^2.3.0"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^27",
+    "jsdom": "^27.2.0",
+    "typescript": "5.0.2",
+    "vite": "^7.2.2",
+    "vitest": "^4.0.9"
   }
 }

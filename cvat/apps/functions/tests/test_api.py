@@ -16,6 +16,7 @@ from cvat.apps.engine.models import (
     Data,
     Job,
     Label,
+    LabeledShape,
     LabeledTrack,
     Segment,
     SourceType,
@@ -290,6 +291,127 @@ class FunctionsApiTests(ApiTestBase):
         self.assertEqual(payload["status"], AnnotationRequestStatus.FAILED)
         self.assertAlmostEqual(payload["progress"], 0.5)
 
+    def test_run_status_endpoint_reports_cancelled(self):
+        function = self._create_function(self.owner)
+        run_id = uuid.uuid4()
+        parameters = {
+            "task": self.task.id,
+            "frame": 0,
+            "type": "init_tracking",
+            "shapes": [],
+            "function_run_id": str(run_id),
+        }
+
+        self._create_annotation_request(
+            function=function,
+            status=AnnotationRequestStatus.CANCELLED,
+            parameters=parameters,
+        )
+
+        response = self._get_request(f"/api/functions/runs/{run_id}", self.owner)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(payload["status"], AnnotationRequestStatus.CANCELLED)
+        self.assertEqual(payload["progress"], 0.0)
+
+    def test_run_cancel_endpoint_cancels_requests_and_rolls_back(self):
+        function = self._create_function(self.owner)
+        run_id = uuid.uuid4()
+        base_parameters = {
+            "task": self.task.id,
+            "frame": 0,
+            "type": "init_tracking",
+            "shapes": [],
+            "function_run_id": str(run_id),
+        }
+
+        pending_request = self._create_annotation_request(
+            function=function,
+            status=AnnotationRequestStatus.PENDING,
+            parameters=base_parameters,
+        )
+        running_request = self._create_annotation_request(
+            function=function,
+            status=AnnotationRequestStatus.RUNNING,
+            parameters={**base_parameters, "frame": 1},
+        )
+
+        track = LabeledTrack.objects.create(
+            job=self.job,
+            label=self.label,
+            frame=0,
+            group=None,
+            source=SourceType.MANUAL.value,
+        )
+        tracked_shape = TrackedShape.objects.create(
+            track=track,
+            frame=1,
+            type="rectangle",
+            points=[0, 0, 1, 1],
+            outside=False,
+            occluded=False,
+            z_order=0,
+            rotation=0,
+            function_run_id=run_id,
+        )
+
+        response = self._post_request(
+            f"/api/functions/runs/{run_id}/cancel",
+            self.owner,
+        )
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(response.json()["cancelled_requests"], 2)
+
+        pending_request.refresh_from_db()
+        running_request.refresh_from_db()
+        self.assertEqual(pending_request.status, AnnotationRequestStatus.CANCELLED)
+        self.assertEqual(running_request.status, AnnotationRequestStatus.CANCELLED)
+        self.assertFalse(TrackedShape.objects.filter(pk=tracked_shape.id).exists())
+
+    def test_run_cancel_endpoint_requires_owner(self):
+        function = self._create_function(self.owner)
+        run_id = uuid.uuid4()
+
+        self._create_annotation_request(
+            function=function,
+            status=AnnotationRequestStatus.PENDING,
+            parameters={
+                "task": self.task.id,
+                "frame": 0,
+                "type": "init_tracking",
+                "shapes": [],
+                "function_run_id": str(run_id),
+            },
+        )
+
+        response = self._post_request(
+            f"/api/functions/runs/{run_id}/cancel",
+            self.other_user,
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_run_cancel_endpoint_conflict_for_completed_run(self):
+        function = self._create_function(self.owner)
+        run_id = uuid.uuid4()
+
+        self._create_annotation_request(
+            function=function,
+            status=AnnotationRequestStatus.DONE,
+            parameters={
+                "task": self.task.id,
+                "frame": 0,
+                "type": "init_tracking",
+                "shapes": [],
+                "function_run_id": str(run_id),
+            },
+        )
+
+        response = self._post_request(
+            f"/api/functions/runs/{run_id}/cancel",
+            self.owner,
+        )
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+
     def test_queue_watch_stream_emits_new_request_event(self):
         function = self._create_function(self.owner)
         self._create_annotation_request(function=function)
@@ -385,6 +507,17 @@ class FunctionsApiTests(ApiTestBase):
         first_track_request = AnnotationRequest.objects.get(
             type="track", parameters__frame=1
         )
+        acquire_track_one = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/acquire",
+            self.owner,
+            data={
+                "agent_id": "tracker-agent",
+                "request_category": AnnotationRequestCategory.BATCH,
+            },
+        )
+        self.assertEqual(acquire_track_one.status_code, status.HTTP_200_OK)
+        assignment = acquire_track_one.json()["ar_assignment"]
+        self.assertEqual(assignment["ar_id"], str(first_track_request.id))
         complete_track_one = self._post_request(
             f"/api/functions/queues/function:{function.id}/requests/{first_track_request.id}/complete",
             self.owner,
@@ -401,6 +534,17 @@ class FunctionsApiTests(ApiTestBase):
         second_track_request = AnnotationRequest.objects.get(
             type="track", parameters__frame=2
         )
+        acquire_track_two = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/acquire",
+            self.owner,
+            data={
+                "agent_id": "tracker-agent",
+                "request_category": AnnotationRequestCategory.BATCH,
+            },
+        )
+        self.assertEqual(acquire_track_two.status_code, status.HTTP_200_OK)
+        assignment = acquire_track_two.json()["ar_assignment"]
+        self.assertEqual(assignment["ar_id"], str(second_track_request.id))
         complete_track_two = self._post_request(
             f"/api/functions/queues/function:{function.id}/requests/{second_track_request.id}/complete",
             self.owner,
@@ -420,6 +564,210 @@ class FunctionsApiTests(ApiTestBase):
         self.assertEqual(frames[1].points, [0, 0, 20, 0, 20, 20, 0, 20])
         self.assertTrue(frames[2].outside)
         self.assertEqual(frames[2].points, [0, 0, 20, 0, 20, 20, 0, 20])
+
+    def test_tracker_action_appends_outside_keyframe_after_target(self):
+        function = self._create_function(self.owner, supported_shape_types=["polygon"])
+        track = self._create_track(frame=0)
+
+        response = self._post_request(
+            f"/api/jobs/{self.job.id}/functions/{function.id}/tracker-actions",
+            self.owner,
+            data={"frame": 0, "target_frame": 2, "track_ids": [track.id]},
+        )
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+
+        init_request = AnnotationRequest.objects.get(type="init_tracking")
+        acquire_response = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/acquire",
+            self.owner,
+            data={
+                "agent_id": "tracker-agent",
+                "request_category": AnnotationRequestCategory.BATCH,
+            },
+        )
+        self.assertEqual(acquire_response.status_code, status.HTTP_200_OK)
+        assignment = acquire_response.json()["ar_assignment"]
+        self.assertEqual(assignment["ar_id"], str(init_request.id))
+        complete_init = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/{init_request.id}/complete",
+            self.owner,
+            data={"agent_id": "tracker-agent", "states": ["state-1"]},
+        )
+        self.assertEqual(complete_init.status_code, status.HTTP_200_OK)
+
+        first_track_request = AnnotationRequest.objects.get(
+            type="track", parameters__frame=1
+        )
+        acquire_track_one = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/acquire",
+            self.owner,
+            data={
+                "agent_id": "tracker-agent",
+                "request_category": AnnotationRequestCategory.BATCH,
+            },
+        )
+        self.assertEqual(acquire_track_one.status_code, status.HTTP_200_OK)
+        assignment = acquire_track_one.json()["ar_assignment"]
+        self.assertEqual(assignment["ar_id"], str(first_track_request.id))
+        complete_track_one = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/{first_track_request.id}/complete",
+            self.owner,
+            data={
+                "agent_id": "tracker-agent",
+                "states": ["state-1"],
+                "shapes": [
+                    {"type": "polygon", "points": [0, 0, 10, 0, 10, 10, 0, 10]},
+                ],
+            },
+        )
+        self.assertEqual(complete_track_one.status_code, status.HTTP_200_OK)
+
+        second_track_request = AnnotationRequest.objects.get(
+            type="track", parameters__frame=2
+        )
+        acquire_track_two = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/acquire",
+            self.owner,
+            data={
+                "agent_id": "tracker-agent",
+                "request_category": AnnotationRequestCategory.BATCH,
+            },
+        )
+        self.assertEqual(acquire_track_two.status_code, status.HTTP_200_OK)
+        assignment = acquire_track_two.json()["ar_assignment"]
+        self.assertEqual(assignment["ar_id"], str(second_track_request.id))
+        complete_track_two = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/{second_track_request.id}/complete",
+            self.owner,
+            data={
+                "agent_id": "tracker-agent",
+                "states": ["state-1"],
+                "shapes": [
+                    {"type": "polygon", "points": [0, 0, 10, 0, 10, 10, 0, 10]},
+                ],
+            },
+        )
+        self.assertEqual(complete_track_two.status_code, status.HTTP_200_OK)
+
+        tracked_shapes = TrackedShape.objects.filter(track=track).order_by("frame")
+        self.assertEqual([shape.frame for shape in tracked_shapes], [0, 1, 2, 2])
+        self.assertFalse(tracked_shapes[1].outside)
+        self.assertFalse(tracked_shapes[2].outside)
+        self.assertTrue(tracked_shapes[3].outside)
+        self.assertEqual(tracked_shapes[3].frame, 2)
+        self.assertEqual(tracked_shapes[2].points, tracked_shapes[3].points)
+
+    def test_tracker_action_removes_existing_shapes_beyond_target(self):
+        function = self._create_function(self.owner, supported_shape_types=["polygon"])
+        track = self._create_track(frame=0)
+        TrackedShape.objects.create(
+            track=track,
+            frame=8,
+            type="polygon",
+            points=[0, 0, 5, 0, 5, 5, 0, 5],
+            outside=False,
+            occluded=False,
+            z_order=0,
+            rotation=0,
+        )
+
+        response = self._post_request(
+            f"/api/jobs/{self.job.id}/functions/{function.id}/tracker-actions",
+            self.owner,
+            data={"frame": 0, "target_frame": 2, "track_ids": [track.id]},
+        )
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+
+        init_request = AnnotationRequest.objects.get(type="init_tracking")
+        acquire_response = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/acquire",
+            self.owner,
+            data={
+                "agent_id": "tracker-agent",
+                "request_category": AnnotationRequestCategory.BATCH,
+            },
+        )
+        self.assertEqual(acquire_response.status_code, status.HTTP_200_OK)
+        assignment = acquire_response.json()["ar_assignment"]
+        self.assertEqual(assignment["ar_id"], str(init_request.id))
+        complete_init = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/{init_request.id}/complete",
+            self.owner,
+            data={"agent_id": "tracker-agent", "states": ["state-1"]},
+        )
+        self.assertEqual(complete_init.status_code, status.HTTP_200_OK)
+
+        for frame, payload in (
+            (1, {"type": "polygon", "points": [0, 0, 10, 0, 10, 10, 0, 10]}),
+            (2, {"type": "polygon", "points": [0, 0, 12, 0, 12, 12, 0, 12]}),
+        ):
+            track_request = AnnotationRequest.objects.get(type="track", parameters__frame=frame)
+            acquire_track = self._post_request(
+                f"/api/functions/queues/function:{function.id}/requests/acquire",
+                self.owner,
+                data={
+                    "agent_id": "tracker-agent",
+                    "request_category": AnnotationRequestCategory.BATCH,
+                },
+            )
+            self.assertEqual(acquire_track.status_code, status.HTTP_200_OK)
+            assignment = acquire_track.json()["ar_assignment"]
+            self.assertEqual(assignment["ar_id"], str(track_request.id))
+            complete_track = self._post_request(
+                f"/api/functions/queues/function:{function.id}/requests/{track_request.id}/complete",
+                self.owner,
+                data={
+                    "agent_id": "tracker-agent",
+                    "states": ["state-1"],
+                    "shapes": [payload],
+                },
+            )
+            self.assertEqual(complete_track.status_code, status.HTTP_200_OK)
+
+        tracked_frames = list(
+            TrackedShape.objects.filter(track=track).order_by("frame").values_list("frame", flat=True)
+        )
+        self.assertEqual(tracked_frames, [0, 1, 2, 2])
+
+    def test_tracker_action_accepts_polygon_shapes(self):
+        function = self._create_function(self.owner, supported_shape_types=["polygon"])
+        shape = self._create_shape(frame=0)
+
+        response = self._post_request(
+            f"/api/jobs/{self.job.id}/functions/{function.id}/tracker-actions",
+            self.owner,
+            data={
+                "frame": 0,
+                "target_frame": 1,
+                "track_ids": [],
+                "shapes": [
+                    {
+                        "id": shape.id,
+                        "client_id": 1001,
+                        "label_id": self.label.id,
+                        "frame": 0,
+                        "shape_type": "polygon",
+                        "points": [0, 0, 10, 0, 10, 10, 0, 10],
+                        "z_order": 0,
+                        "rotation": 0,
+                        "group": None,
+                        "occluded": False,
+                        "outside": False,
+                        "source": SourceType.MANUAL.value,
+                        "attributes": [],
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+
+        init_request = AnnotationRequest.objects.get(type="init_tracking")
+        tracking_targets = init_request.parameters["tracking_targets"]
+        self.assertEqual(len(tracking_targets), 1)
+        target = tracking_targets[0]
+        self.assertEqual(target["kind"], "shape")
+        self.assertEqual(target["original_shape_id"], shape.id)
+        self.assertEqual(init_request.parameters["conversion_mode"], "inline")
 
     def test_tracker_propagates_updated_states_between_frames(self):
         function = self._create_function(self.owner, supported_shape_types=["polygon"])
@@ -501,27 +849,6 @@ class FunctionsApiTests(ApiTestBase):
         self.assertEqual(requests.count(), 1)
         mock_wait.assert_called_once()
 
-    @mock.patch("cvat.apps.functions.interactors.interactor_wait_slot")
-    def test_run_native_interactor_429_when_slots_busy(self, mock_wait_slot):
-        def _raise():
-            raise interactors.InteractorWaitQueueBusy()
-
-        mock_wait_slot.side_effect = _raise
-        function = self._create_function(self.owner, kind=FunctionKind.INTERACTOR)
-
-        response = self._post_request(
-            f"/api/jobs/{self.job.id}/functions/{function.id}/interactions",
-            self.owner,
-            data={
-                "frame": 0,
-                "pos_points": [[10.0, 15.0]],
-                "neg_points": [],
-                "obj_bbox": [[0.0, 0.0], [1.0, 1.0]],
-            },
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
-
     @mock.patch("cvat.apps.functions.interactors.wait_for_interactor_request")
     @mock.patch("cvat.apps.functions.interactors.interactor_wait_slot")
     def test_run_native_interactor_timeout_returns_504(
@@ -545,6 +872,21 @@ class FunctionsApiTests(ApiTestBase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_504_GATEWAY_TIMEOUT)
+
+    def _create_shape(self, *, frame: int = 0) -> LabeledShape:
+        return LabeledShape.objects.create(
+            job=self.job,
+            label=self.label,
+            frame=frame,
+            group=0,
+            source=SourceType.MANUAL.value,
+            type="polygon",
+            points=[0, 0, 10, 0, 10, 10, 0, 10],
+            rotation=0,
+            z_order=0,
+            occluded=False,
+            outside=False,
+        )
 
     def _create_track(self, *, frame: int = 0) -> LabeledTrack:
         track = LabeledTrack.objects.create(

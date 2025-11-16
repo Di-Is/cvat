@@ -899,6 +899,8 @@ class JobPermission(OpenPolicyAgentPermission, DownloadExportedExtension):
             ('data', 'GET'): Scopes.VIEW_DATA,
             ('metadata','GET'): Scopes.VIEW_METADATA,
             ('metadata','PATCH'): Scopes.UPDATE_METADATA,
+            ('function_interactions', 'POST'): Scopes.UPDATE_ANNOTATIONS,
+            ('tracker_actions', 'POST'): Scopes.UPDATE_ANNOTATIONS,
             ('initiate_dataset_export', 'POST'): Scopes.EXPORT_DATASET if is_dataset_export(request) else Scopes.EXPORT_ANNOTATIONS,
             ('preview', 'GET'): Scopes.VIEW,
             ('validation_layout', 'GET'): Scopes.VIEW_VALIDATION_LAYOUT,

@@ -59,6 +59,8 @@ export class CanvasControllerImpl implements CanvasController {
 
     public constructor(model: CanvasModel) {
         this.model = model;
+        this.lastDragPosition = { x: 0, y: 0 };
+        this.isDragging = false;
     }
 
     public zoom(x: number, y: number, deltaY: number): void {

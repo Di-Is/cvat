@@ -58,8 +58,11 @@ class TracksCounter:
                 frame = shape["frame"]
                 is_outside = shape["outside"]
                 assert (
-                    frame > prev_frame
+                    frame >= prev_frame
                 ), f"{frame} > {prev_frame}. Track id: {track['id']}"  # Catch invalid tracks
+                if frame == prev_frame:
+                    prev_is_outside = is_outside
+                    continue
 
                 if not prev_is_outside:
                     # -1 means that current keyframe is not interpolated frame

@@ -3,6 +3,7 @@
 //
 // SPDX-License-Identifier: MIT
 
+import './polyfills/promise-all-settled';
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { connect, Provider } from 'react-redux';

@@ -6,7 +6,7 @@ import {
     AnalyticsEventsFilter, QualityConflictsFilter, QualityReportsFilter,
     QualitySettingsFilter, ConsensusSettingsFilter, ApiTokensFilter,
     FunctionsFilter, SerializedFunction, SerializedAnnotationRequestDetail,
-    SerializedFunctionRunStatus,
+    SerializedFunctionRunStatus, SerializedFunctionRunCancelResponse,
 } from './server-response-types';
 import PluginRegistry from './plugins';
 import serverProxy from './server-proxy';
@@ -75,6 +75,7 @@ export default interface CVATCore {
         };
         runs: {
             get: (runId: string) => Promise<SerializedFunctionRunStatus>;
+            cancel: (runId: string) => Promise<SerializedFunctionRunCancelResponse>;
         };
     };
     server: {

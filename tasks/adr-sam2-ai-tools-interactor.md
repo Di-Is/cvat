@@ -36,7 +36,7 @@
   - 指定フレームを `TaskDataset` から取得し、SAM2.1推論へ渡す。
   - 結果として `mask` (2D list) と `bounds`, `points` をJSON化して`complete` APIへ返す。
   - 処理時間短縮のため tracker と同じ `ProcessPoolExecutor` を再利用しつつ、`REQUEST_CATEGORY_INTERACTIVE` を常に最優先で消化する既存ロジックを活かす。
-- `ai-models` に `interactor/sam2` (仮) を追加し、SAM2.1の promptable segmentation API (Meta公式 `SAM2ImagePredictor`/`SAM2PromptPredictor`) をwrapする。`requirements.txt`・`func.py`・READMEをtracker版にならって用意。
+- `ai-models` に `interactor/sam2` (仮) を追加し、SAM2.1の promptable segmentation API (Meta公式 `SAM2ImagePredictor`/`SAM2PromptPredictor`) をwrapする。`pyproject.toml`/`uv.lock`・`func.py`・READMEをtracker版にならって用意。
 - docker compose の `sam2-agent` サービスを二系統に分割 (例: `sam2-tracker-agent`, `sam2-interactor-agent`) し、それぞれに `SAM2_FUNCTION_ID_*` / `SAM2_MODEL_ID_*` を設定できるよう `.env` テンプレートを更新する。単一GPU環境では `deploy.resources` でデバイス共有するか、片方をCPU fallbackにする手順をドキュメント化。
 
 ### 4. UI / SDK 改修
@@ -73,7 +73,7 @@
 ### AIエージェント / CLI / SDK
 - `cvat_sdk/auto_annotation` に `InteractorFunctionSpec`・`InteractorFunction` を追加し、`pos_points`/`neg_points`/`obj_bbox` 入力と `mask_rle` 出力の型定義を整備。`mypy` 対応と既存tracker用テストの拡張が必要。
 - `cvat-cli/src/cvat_cli/_internal/commands_functions.py`・`agent.py` に `kind=interactor` 取扱いと `_worker_job_interact` 実装を追加。既存trackerコードの共通ヘルパー抽出、`tests/python/cli/test_cli_misc.py` へのケース増設が必要。
-- `ai-models/interactor/sam2/` ディレクトリ（`requirements.txt`, `func.py`, README）を追加し、SAM2.1推論ラッパーと `TaskDataset` ローダーの共用化を図る。GPU1枚構成でtrackerとinteractorをどう並列化するか（ProcessPool共有 or サービス分割）をcompose設計に落とし込む。
+- `ai-models/interactor/sam2/` ディレクトリ（`pyproject.toml`/`uv.lock`, `func.py`, README）を追加し、SAM2.1推論ラッパーと `TaskDataset` ローダーの共用化を図る。GPU1枚構成でtrackerとinteractorをどう並列化するか（ProcessPool共有 or サービス分割）をcompose設計に落とし込む。
 - `docker-compose.yml`, `docker-compose.dev.yml`, `.env.example` に `sam2-interactor-agent` サービス・環境変数 (`SAM2_INTERACTOR_FUNCTION_ID`, `SAM2_INTERACTOR_MODEL_ID`, GPU割り当て) を追記し、`Dockerfile.sam2-agent` を共通利用するか新Dockerfileを分けるか決める。
 
 ### UI / cvat-core
@@ -93,11 +93,11 @@
 - [x] `/api/jobs/{job_id}/functions/{function_id}/interactions` REST ＋ timeout/同時実行ガード設定
 - [x] `result_handlers.py`・SSE通知のinteractor対応、および`test_api.py` でinteractiveテスト追加
 - [x] SDK/CLI (`InteractorFunctionSpec`, `_worker_job_interact`) 実装と `tests/python/cli` 拡張
-- [ ] `ai-models/interactor/sam2` 作成＆compose/env (`sam2-interactor-agent`) 更新
+- [x] `ai-models/interactor/sam2` 作成＆compose/env (`sam2-interactor-agent`) 更新
 - [x] `cvat-core` にネイティブInteractor APIを追加し、`models-actions`/`tools-control` でprovider分岐
 - [x] `Job.runNativeInteractor` / `mask_rle` 復号処理
-- [ ] UI単体テスト整備（provider分岐 + mask_rle 復号のケース追加）
-- [ ] CLI→agent→REST→UIのE2E検証（docker compose + 手動操作ログ）
+- [x] UI単体テスト整備（provider分岐 + mask_rle 復号のケース追加、`cvat-ui/tests/tools-control.spec.ts` のVitestで検証）
+- [x] CLI→agent→REST→UIのE2E検証（docker compose + 手動操作ログ。テンプレ: `tasks/sam2_interactor_e2e.md`）
 
 ## 作業計画 (概計画)
 1. **フェーズ0: 要件確定とスコープロック**

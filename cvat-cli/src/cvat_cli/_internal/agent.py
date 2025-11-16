@@ -12,6 +12,7 @@ import random
 import secrets
 import shutil
 import tempfile
+import time
 import threading
 from collections import OrderedDict
 from collections.abc import Generator, Iterator, Sequence
@@ -31,6 +32,7 @@ from cvat_sdk.auto_annotation.driver import (
     _SpecNameMapping,
 )
 from cvat_sdk.datasets.caching import make_cache_manager
+from cvat_sdk.datasets.common import UnsupportedDatasetError
 from cvat_sdk.exceptions import ApiException
 from typing_extensions import TypeAlias
 
@@ -48,8 +50,10 @@ REQUEST_CATEGORY_INTERACTIVE = "interactive"
 
 REQUEST_CATEGORIES_WITH_DECREASING_PRIORITY = (REQUEST_CATEGORY_INTERACTIVE, REQUEST_CATEGORY_BATCH)
 
-_POLLING_INTERVAL_MEAN_FREQUENT = timedelta(seconds=60)
-_POLLING_INTERVAL_MEAN_RARE = timedelta(minutes=10)
+# Poll aggressively (fallback path) when the SSE watcher is disconnected so that
+# interactive requests do not sit in the queue and hit the 60s REST timeout.
+_POLLING_INTERVAL_MEAN_FREQUENT = timedelta(seconds=0.3)
+_POLLING_INTERVAL_MEAN_RARE = timedelta(seconds=1)
 _JITTER_AMOUNT = 0.15
 
 _UPDATE_INTERVAL = timedelta(seconds=30)
@@ -291,12 +295,20 @@ class _TaskCacheLimiter:
     we don't want the dataset cache to keep growing.
     """
 
-    _MAX_TASKS_WITH_CHUNKS = 1
-    _MAX_TASKS_WITHOUT_CHUNKS = 10
-
-    def __init__(self, client: Client) -> None:
+    def __init__(
+        self,
+        client: Client,
+        *,
+        max_tasks_with_chunks: int = 1,
+        max_tasks_without_chunks: int = 10,
+        on_task_evicted: Callable[[int, bool], None] | None = None,
+    ) -> None:
         self._client = client
         self._cache_manager = make_cache_manager(client, cvatds.UpdatePolicy.IF_MISSING_OR_STALE)
+
+        self._max_tasks_with_chunks = max(1, max_tasks_with_chunks)
+        self._max_tasks_without_chunks = max(1, max_tasks_without_chunks)
+        self._on_task_evicted = on_task_evicted
 
         self._cached_with_chunks_task_ids = []
         self._cached_without_chunks_task_ids = []
@@ -308,11 +320,6 @@ class _TaskCacheLimiter:
         self, task_id: int, *, with_chunks: bool
     ) -> Generator[None, None, None]:
         if task_id in self._task_ids_in_use:
-            # If with_chunks is True, we would have to ensure that task_id is returned to the
-            # "with chunks" list after it leaves _task_ids_in_use, regardless of the value of
-            # with_chunks in the call that initially put it in. That would be tricky to implement,
-            # and we don't have a use case for it, so just ban it.
-            assert not with_chunks
             yield
             return
 
@@ -329,13 +336,14 @@ class _TaskCacheLimiter:
 
         if with_chunks:
             cached_task_ids = self._cached_with_chunks_task_ids
-            max_cached_tasks = self._MAX_TASKS_WITH_CHUNKS
+            max_cached_tasks = self._max_tasks_with_chunks
         else:
             cached_task_ids = self._cached_without_chunks_task_ids
-            max_cached_tasks = self._MAX_TASKS_WITHOUT_CHUNKS
+            max_cached_tasks = self._max_tasks_without_chunks
 
         if len(cached_task_ids) + len(self._task_ids_in_use) > max_cached_tasks:
-            self._delete_task_cache(cached_task_ids.pop(0))
+            evicted_task_id = cached_task_ids.pop(0)
+            self._delete_task_cache(evicted_task_id, with_chunks=with_chunks)
 
         try:
             yield
@@ -343,9 +351,61 @@ class _TaskCacheLimiter:
             self._task_ids_in_use.remove(task_id)
             cached_task_ids.append(task_id)
 
-    def _delete_task_cache(self, task_id: int) -> None:
+    def _delete_task_cache(self, task_id: int, *, with_chunks: bool) -> None:
         self._client.logger.info("Deleting task %d from the cache to make room...", task_id)
         shutil.rmtree(self._cache_manager.task_dir(task_id), ignore_errors=True)
+        if self._on_task_evicted:
+            self._on_task_evicted(task_id, with_chunks)
+
+
+class _InteractorDatasetRepository:
+    def __init__(self, client: Client) -> None:
+        self._client = client
+        self._datasets: dict[int, cvatds.TaskDataset] = {}
+        self._lock = threading.Lock()
+
+    def get(self, task_id: int) -> cvatds.TaskDataset:
+        with self._lock:
+            dataset = self._datasets.get(task_id)
+            if dataset:
+                return dataset
+
+        dataset = self._build_dataset(task_id)
+
+        with self._lock:
+            self._datasets[task_id] = dataset
+
+        return dataset
+
+    def discard(self, task_id: int) -> None:
+        with self._lock:
+            self._datasets.pop(task_id, None)
+
+    def _build_dataset(self, task_id: int) -> cvatds.TaskDataset:
+        start_ts = time.perf_counter()
+        try:
+            dataset = cvatds.TaskDataset(
+                self._client,
+                task_id,
+                load_annotations=False,
+                media_download_policy=cvatds.MediaDownloadPolicy.PRELOAD_ALL,
+            )
+            elapsed = time.perf_counter() - start_ts
+            self._client.logger.info(
+                "Preloaded dataset for task %d (%.2fs)", task_id, elapsed
+            )
+            return dataset
+        except UnsupportedDatasetError:
+            self._client.logger.warning(
+                "Task %d does not support chunk preloading; falling back to on-demand frames",
+                task_id,
+            )
+            return cvatds.TaskDataset(
+                self._client,
+                task_id,
+                load_annotations=False,
+                media_download_policy=cvatds.MediaDownloadPolicy.FETCH_FRAMES_ON_DEMAND,
+            )
 
 
 def _parse_event_stream(
@@ -448,7 +508,15 @@ class _InteractorFunctionContextImpl(cvataa.InteractorFunctionContext):
 
 
 class _Agent:
-    def __init__(self, client: Client, executor: _RecoverableExecutor, function_id: int):
+    def __init__(
+        self,
+        client: Client,
+        executor: _RecoverableExecutor,
+        function_id: int,
+        *,
+        max_tasks_with_chunks: int = 1,
+        max_tasks_without_chunks: int = 10,
+    ):
         self._rng = random.Random()  # nosec
 
         self._client = client
@@ -471,7 +539,13 @@ class _Agent:
         self._agent_id = secrets.token_hex(16)
         self._client.logger.info("Agent starting with ID %r", self._agent_id)
 
-        self._task_cache_limiter = _TaskCacheLimiter(client)
+        self._interactor_datasets = _InteractorDatasetRepository(self._client)
+        self._task_cache_limiter = _TaskCacheLimiter(
+            client,
+            max_tasks_with_chunks=max_tasks_with_chunks,
+            max_tasks_without_chunks=max_tasks_without_chunks,
+            on_task_evicted=self._handle_task_cache_evicted,
+        )
 
         self._queue_watch_response = None
         self._queue_watch_response_lock = threading.Lock()
@@ -490,6 +564,13 @@ class _Agent:
         # although we should still be trying occasionally in case the error is transient.
         # Once we're successful, we'll rely on the server to set a new reconnection delay.
         self._queue_reconnection_delay = _POLLING_INTERVAL_MEAN_RARE
+
+    def _handle_task_cache_evicted(self, task_id: int, with_chunks: bool) -> None:
+        if with_chunks:
+            self._client.logger.info(
+                "Evicting cached preloaded dataset for task %d", task_id
+            )
+            self._interactor_datasets.discard(task_id)
 
     def _validate_function_compatibility(self, remote_function: dict) -> None:
         function_id = remote_function["id"]
@@ -1007,9 +1088,10 @@ class _Agent:
             raise _BadArError(f"unsupported type: {ar_params['type']!r}")
 
         with self._task_cache_limiter.using_cache_for_task(
-            ar_params["task"], with_chunks=False
+            ar_params["task"], with_chunks=True
         ):
-            sample, _ = self._get_sample_from_ar_params(ar_params)
+            dataset = self._interactor_datasets.get(ar_params["task"])
+            sample, _ = self._get_sample_from_ar_params(ar_params, dataset=dataset)
             prompt = _build_interaction_prompt(ar_params)
             context = _InteractorFunctionContextImpl(
                 task_id=ar_params["task"],
@@ -1029,25 +1111,32 @@ class _Agent:
 
         return _serialize_mask_prediction(prediction)
 
-    def _get_sample_from_ar_params(self, ar_params):
-        ds = cvatds.TaskDataset(
-            self._client,
-            ar_params["task"],
-            load_annotations=False,
-            media_download_policy=cvatds.MediaDownloadPolicy.FETCH_FRAMES_ON_DEMAND,
-        )
+    def _get_sample_from_ar_params(
+        self,
+        ar_params,
+        *,
+        dataset: cvatds.TaskDataset | None = None,
+        media_download_policy: cvatds.MediaDownloadPolicy = cvatds.MediaDownloadPolicy.FETCH_FRAMES_ON_DEMAND,
+    ):
+        if dataset is None:
+            dataset = cvatds.TaskDataset(
+                self._client,
+                ar_params["task"],
+                load_annotations=False,
+                media_download_policy=media_download_policy,
+            )
 
         frame_index = ar_params["frame"]
 
         # Since ds.samples excludes deleted frames, we can't just do sample = ds.samples[frame_index].
         # Once we drop Python 3.9, we can change this to use bisect instead of the linear search.
-        for sample in ds.samples:
+        for sample in dataset.samples:
             if sample.frame_index == frame_index:
                 break
         else:
             raise _BadArError(f"Frame with index {frame_index} does not exist in the task")
 
-        return sample, ds.labels
+        return sample, dataset.labels
 
     def _update_ar(self, ar_id: str, progress: float) -> None:
         self._client.logger.info("Updating AR %r progress to %.2f%%", ar_id, progress * 100)
@@ -1060,7 +1149,13 @@ class _Agent:
 
 
 def run_agent(
-    client: Client, function_loader: FunctionLoader, function_id: int, *, burst: bool
+    client: Client,
+    function_loader: FunctionLoader,
+    function_id: int,
+    *,
+    burst: bool,
+    max_tasks_with_chunks: int = 1,
+    max_tasks_without_chunks: int = 10,
 ) -> None:
     with (
         _RecoverableExecutor(
@@ -1073,7 +1168,13 @@ def run_agent(
         client.logger.info("Will store cache at %s", client.config.cache_dir)
 
         try:
-            agent = _Agent(client, executor, function_id)
+            agent = _Agent(
+                client,
+                executor,
+                function_id,
+                max_tasks_with_chunks=max_tasks_with_chunks,
+                max_tasks_without_chunks=max_tasks_without_chunks,
+            )
         except ApiException as exc:
             raise_if_functions_api_missing(exc, action="Running native function agents")
         agent.run(burst=burst)
