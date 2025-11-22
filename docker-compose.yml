@@ -45,6 +45,12 @@ services:
       POSTGRES_USER: root
       POSTGRES_DB: cvat
       POSTGRES_HOST_AUTH_METHOD: trust
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+      - "-c"
+      - "pg_stat_statements.track=all"
     volumes:
       - cvat_db:/var/lib/postgresql/data
     networks:
@@ -263,9 +269,20 @@ services:
       CVAT_URL: ${SAM2_AGENT_CVAT_URL:-http://cvat-server:8080}
       SAM2_MODEL_ID: ${SAM2_TRACKER_MODEL_ID:-facebook/sam2.1-hiera-small}
       SAM2_DEVICE: ${SAM2_TRACKER_DEVICE:-cuda}
+      SAM2_TRACKER_VOS_OPTIMIZED: ${SAM2_TRACKER_VOS_OPTIMIZED:-0}
+      SAM2_TRACKER_FAST_PREPROCESS: ${SAM2_TRACKER_FAST_PREPROCESS:-1}
+      SAM2_TRACKER_DOUBLE_BUFFER: ${SAM2_TRACKER_DOUBLE_BUFFER:-1}
+      SAM2_TRACKER_WARMUP_FRAMES: ${SAM2_TRACKER_WARMUP_FRAMES:-2}
+      TORCHINDUCTOR_COMPILE_THREADS: ${SAM2_TRACKER_COMPILE_THREADS:-1}
+      TORCHINDUCTOR_MAX_AUTOTUNE_GEMM: ${SAM2_TRACKER_MAX_AUTOTUNE_GEMM:-16}
+      TORCHINDUCTOR_MAX_AUTOTUNE_POINTWISE: ${SAM2_TRACKER_MAX_AUTOTUNE_POINTWISE:-16}
+      TORCHINDUCTOR_MAX_AUTOTUNE_CONV: ${SAM2_TRACKER_MAX_AUTOTUNE_CONV:-16}
+      TORCHINDUCTOR_USE_CUDAGRAPHS: ${SAM2_TRACKER_USE_CUDAGRAPHS:-}
       SAM2_FUNCTION_ID: ${SAM2_TRACKER_FUNCTION_ID:-}
       SAM2_EXTRA_AGENT_ARGS: ${SAM2_TRACKER_EXTRA_AGENT_ARGS:-}
       SAM2_FUNCTION_FILE: ${SAM2_TRACKER_FUNCTION_FILE:-/workspace/src/ai-models/tracker/sam2/func.py}
+      SAM2_TRACKER_VERBOSE: ${SAM2_TRACKER_VERBOSE:-0}
+      SAM2_TRACKER_ASYNC_PREPROCESS: ${SAM2_TRACKER_ASYNC_PREPROCESS:-0}
       HF_HOME: /var/cache/huggingface
     volumes:
       - ./ai-models/tracker/sam2:/workspace/src/ai-models/tracker/sam2:ro

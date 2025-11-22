@@ -4,6 +4,7 @@
 
 from .caching import UpdatePolicy
 from .common import (
+    ChunkCacheMode,
     FrameAnnotations,
     MediaDownloadPolicy,
     MediaElement,
@@ -13,6 +14,7 @@ from .common import (
 from .task_dataset import TaskDataset
 
 __all__ = [
+    "ChunkCacheMode",
     "FrameAnnotations",
     "MediaDownloadPolicy",
     "MediaElement",

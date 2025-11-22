@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta
 from typing import Iterable
 
-from django.db import transaction
-from django.db.models import QuerySet
+from django.db import close_old_connections, transaction
 from django.http import StreamingHttpResponse
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
@@ -14,7 +14,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import notifications, telemetry
-from .models import AnnotationRequest, AnnotationRequestStatus, Function
+from .models import AnnotationRequest, AnnotationRequestStatus, Function, FunctionRunStatus
 from .permissions import IsFunctionOwner
 from .serializers import (
     AnnotationRequestAcquireResponseSerializer,
@@ -34,13 +34,22 @@ from .services import (
     get_annotation_request_owned_by_user,
 )
 from .result_handlers import AnnotationRequestResultError, apply_annotation_result
+from .run_status import (
+    log_tracker_server_event,
+    register_request_completed,
+    register_request_failed,
+    register_request_progress,
+    register_request_running,
+    register_run_cancelled,
+)
 from .tracking import handle_request_completion, rollback_tracking_run
 
 QUEUE_WATCH_POLL_INTERVAL = 0.2
 QUEUE_WATCH_EVENT_COOLDOWN = timedelta(milliseconds=200)
 QUEUE_WATCH_RECONNECT_DELAY = timedelta(milliseconds=500)
-_QUEUE_WATCH_KEEPALIVE_INTERVAL = timedelta(seconds=10)
+_QUEUE_WATCH_KEEPALIVE_INTERVAL = timedelta(seconds=2)
 _QUEUE_WATCH_SNAPSHOT_INTERVAL = timedelta(seconds=30)
+_QUEUE_WATCH_STREAM_TTL = timedelta(seconds=30)
 
 
 class FunctionViewSet(viewsets.ModelViewSet):
@@ -121,6 +130,7 @@ class BaseQueueRequestMutationView(APIView):
             annotation_request.status = AnnotationRequestStatus.RUNNING
             annotation_request.updated_at = timezone.now()
             annotation_request.save(update_fields=["status", "updated_at"])
+            register_request_running(annotation_request)
             return
 
         raise ValidationError("Annotation request is not running")
@@ -140,6 +150,7 @@ class BaseQueueRequestMutationView(APIView):
 
 class FunctionQueueCompleteView(BaseQueueRequestMutationView):
     def post(self, request, queue_id: str, request_id: str) -> Response:
+        started_at = time.perf_counter()
         serializer = AnnotationRequestCompletionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -162,6 +173,13 @@ class FunctionQueueCompleteView(BaseQueueRequestMutationView):
                 update_fields=["status", "progress", "result", "updated_at"]
             )
             handle_request_completion(annotation_request)
+            register_request_completed(annotation_request)
+        wall_ms = (time.perf_counter() - started_at) * 1000.0
+        log_tracker_server_event(
+            "queue_complete",
+            annotation_request=annotation_request,
+            payload={"wall_ms": round(wall_ms, 3)},
+        )
         return Response(status=status.HTTP_200_OK)
 
 
@@ -178,11 +196,13 @@ class FunctionQueueFailView(BaseQueueRequestMutationView):
         annotation_request.result = {"exc_info": serializer.validated_data.get("exc_info", "")}
         annotation_request.updated_at = timezone.now()
         annotation_request.save(update_fields=["status", "result", "updated_at"])
+        register_request_failed(annotation_request)
         return Response(status=status.HTTP_200_OK)
 
 
 class FunctionQueueUpdateView(BaseQueueRequestMutationView):
     def post(self, request, queue_id: str, request_id: str) -> Response:
+        started_at = time.perf_counter()
         serializer = AnnotationRequestProgressSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -193,6 +213,13 @@ class FunctionQueueUpdateView(BaseQueueRequestMutationView):
         annotation_request.progress = serializer.validated_data["progress"]
         annotation_request.updated_at = timezone.now()
         annotation_request.save(update_fields=["progress", "updated_at"])
+        register_request_progress(annotation_request)
+        wall_ms = (time.perf_counter() - started_at) * 1000.0
+        log_tracker_server_event(
+            "queue_update",
+            annotation_request=annotation_request,
+            payload={"wall_ms": round(wall_ms, 3)},
+        )
         return Response(status=status.HTTP_200_OK)
 
 
@@ -212,16 +239,15 @@ class FunctionRunStatusView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, run_id: str) -> Response:
-        run_requests = AnnotationRequest.objects.filter(
-            owner=request.user,
-            parameters__function_run_id=str(run_id),
-        ).order_by("created_at")
+        try:
+            summary = FunctionRunStatus.objects.get(
+                owner=request.user,
+                run_id=run_id,
+            )
+        except FunctionRunStatus.DoesNotExist as exc:
+            raise NotFound(detail="Run not found") from exc
 
-        if not run_requests.exists():
-            raise NotFound(detail="Run not found")
-
-        summary = _summarize_run_status(run_requests, run_id=str(run_id))
-        serializer = FunctionRunStatusSerializer(summary)
+        serializer = FunctionRunStatusSerializer(summary.as_status_payload())
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
@@ -229,13 +255,12 @@ class FunctionRunCancelView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, run_id: str) -> Response:
-        run_requests = AnnotationRequest.objects.filter(
-            owner=request.user,
-            parameters__function_run_id=str(run_id),
-        )
+        try:
+            summary = FunctionRunStatus.objects.get(owner=request.user, run_id=run_id)
+        except FunctionRunStatus.DoesNotExist as exc:
+            raise NotFound(detail="Run not found") from exc
 
-        if not run_requests.exists():
-            raise NotFound(detail="Run not found")
+        run_requests = summary.annotation_requests.all()
 
         cancellable_statuses = {
             AnnotationRequestStatus.PENDING,
@@ -271,8 +296,10 @@ class FunctionRunCancelView(APIView):
                 }
                 annotation_request.updated_at = now
                 annotation_request.save(update_fields=["status", "result", "updated_at"])
+            run_status = summary if cancellable_requests else None
 
         rollback_tracking_run(str(run_id))
+        register_run_cancelled(run_status, cancelled_count=len(cancellable_requests))
 
         response = Response(
             {
@@ -292,29 +319,37 @@ def _queue_event_stream(*, function_id: int) -> Iterable[bytes]:
     last_notified: dict[str, datetime] = {}
     keepalive_deadline = timezone.now() + _QUEUE_WATCH_KEEPALIVE_INTERVAL
     snapshot_deadline = timezone.now()
+    stream_deadline = timezone.now() + _QUEUE_WATCH_STREAM_TTL
 
-    with telemetry.traced("functions.queue_watch.stream", function_id=function_id):
-        with notifications.queue_listener(function_id) as listener:
-            while True:
-                now = timezone.now()
-                if snapshot_deadline <= now or not listener.is_connected:
-                    snapshot_deadline = now + _QUEUE_WATCH_SNAPSHOT_INTERVAL
-                    yield from _emit_pending_categories(function_id, last_notified, now=now)
+    try:
+        with telemetry.traced("functions.queue_watch.stream", function_id=function_id):
+            with notifications.queue_listener(function_id) as listener:
+                while True:
+                    now = timezone.now()
+                    if stream_deadline <= now:
+                        break
 
-                message = listener.next_message(timeout=QUEUE_WATCH_POLL_INTERVAL)
-                if message:
-                    category = message.get("category")
-                    if category:
-                        yield from _emit_queue_event(
-                            category=category,
-                            request_id=message.get("request_id"),
-                            last_notified=last_notified,
-                            now=timezone.now(),
-                        )
+                    if snapshot_deadline <= now or not listener.is_connected:
+                        snapshot_deadline = now + _QUEUE_WATCH_SNAPSHOT_INTERVAL
+                        yield from _emit_pending_categories(function_id, last_notified, now=now)
 
-                if keepalive_deadline <= timezone.now():
-                    yield b": keep-alive\n\n"
-                    keepalive_deadline = timezone.now() + _QUEUE_WATCH_KEEPALIVE_INTERVAL
+                    message = listener.next_message(timeout=QUEUE_WATCH_POLL_INTERVAL)
+                    if message:
+                        category = message.get("category")
+                        if category:
+                            yield from _emit_queue_event(
+                                category=category,
+                                request_id=message.get("request_id"),
+                                last_notified=last_notified,
+                                now=timezone.now(),
+                            )
+
+                    now = timezone.now()
+                    if keepalive_deadline <= now:
+                        yield b": keep-alive\n\n"
+                        keepalive_deadline = now + _QUEUE_WATCH_KEEPALIVE_INTERVAL
+    finally:
+        close_old_connections()
 
 
 def _emit_pending_categories(
@@ -359,76 +394,3 @@ def _emit_queue_event(
     payload_bytes = json.dumps(payload).encode("utf-8")
     yield b"event: newrequest\n"
     yield b"data: " + payload_bytes + b"\n\n"
-def _summarize_run_status(
-    requests_qs: QuerySet[AnnotationRequest],
-    *,
-    run_id: str,
-) -> dict[str, object]:
-    total_requests = requests_qs.count()
-    completed_requests = requests_qs.filter(status=AnnotationRequestStatus.DONE).count()
-    total_expected_frames = None
-    if total_requests:
-        init_request = (
-            requests_qs.filter(type="init_tracking").order_by("created_at").first()
-        )
-        if init_request:
-            params = init_request.parameters or {}
-            start_frame = params.get("start_frame")
-            target_frame = params.get("target_frame")
-            if (
-                isinstance(start_frame, int)
-                and isinstance(target_frame, int)
-                and target_frame >= start_frame
-            ):
-                total_expected_frames = (target_frame - start_frame) + 1
-    failed_request = (
-        requests_qs.filter(status=AnnotationRequestStatus.FAILED)
-        .order_by("-updated_at")
-        .first()
-    )
-    cancelled_request = (
-        requests_qs.filter(status=AnnotationRequestStatus.CANCELLED)
-        .order_by("-updated_at")
-        .first()
-    )
-    running_request = (
-        requests_qs.filter(status=AnnotationRequestStatus.RUNNING)
-        .order_by("-updated_at")
-        .first()
-    )
-    has_pending = requests_qs.filter(status=AnnotationRequestStatus.PENDING).exists()
-
-    if cancelled_request:
-        status_value = AnnotationRequestStatus.CANCELLED
-    elif failed_request:
-        status_value = AnnotationRequestStatus.FAILED
-    elif running_request or has_pending:
-        status_value = AnnotationRequestStatus.RUNNING
-    else:
-        status_value = AnnotationRequestStatus.DONE
-
-    denominator = total_expected_frames or total_requests
-    base_progress = completed_requests / denominator if denominator else 0.0
-
-    if status_value == AnnotationRequestStatus.DONE:
-        progress_value = 1.0
-    elif status_value == AnnotationRequestStatus.CANCELLED:
-        progress_value = base_progress
-    else:
-        if running_request and denominator:
-            progress_value = min(
-                base_progress + (running_request.progress or 0.0) / denominator,
-                0.99,
-            )
-        else:
-            progress_value = base_progress
-
-    return {
-        "run_id": run_id,
-        "status": status_value,
-        "progress": progress_value,
-        "active_request_id": str(running_request.id) if running_request else None,
-        "failed_request_id": str(failed_request.id) if failed_request else None,
-        "total_requests": total_requests,
-        "completed_requests": completed_requests,
-    }

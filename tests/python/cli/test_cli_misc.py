@@ -229,6 +229,7 @@ class TestCliMisc(TestCliBase):
             captured["burst"] = kwargs["burst"]
             captured["max_with"] = kwargs["max_tasks_with_chunks"]
             captured["max_without"] = kwargs["max_tasks_without_chunks"]
+            captured["tracker_verbose_logs"] = kwargs.get("tracker_verbose_logs")
 
         monkeypatch.setattr(agent_module, "run_agent", fake_run_agent)
         function_file = Path(__file__).with_name("example_function.py")
@@ -248,6 +249,29 @@ class TestCliMisc(TestCliBase):
         assert captured["burst"] is False
         assert captured["max_with"] == 3
         assert captured["max_without"] == 7
+        assert captured["tracker_verbose_logs"] is None
+
+    def test_run_agent_include_fetch_metrics_flag(self, monkeypatch):
+        import cvat_cli._internal.agent as agent_module
+
+        captured: dict[str, bool | None] = {}
+
+        def fake_run_agent(*_, **kwargs):
+            captured["tracker_verbose_logs"] = kwargs.get("tracker_verbose_logs")
+
+        monkeypatch.setattr(agent_module, "run_agent", fake_run_agent)
+        function_file = Path(__file__).with_name("example_function.py")
+
+        self.run_cli(
+            "function",
+            "run-agent",
+            "2",
+            "--function-file",
+            str(function_file),
+            "--include-fetch-metrics",
+        )
+
+        assert captured["tracker_verbose_logs"] is True
 
     def test_interactor_dataset_repository_caches(self, monkeypatch):
         import logging
@@ -263,6 +287,7 @@ class TestCliMisc(TestCliBase):
                 task_id,
                 load_annotations=False,
                 media_download_policy=None,
+                chunk_cache_mode=None,
             ):
                 created.append(task_id)
                 self.samples = []

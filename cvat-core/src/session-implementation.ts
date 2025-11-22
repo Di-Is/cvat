@@ -652,6 +652,14 @@ export function implementJob(Job: typeof JobClass): typeof JobClass {
                 throw new ArgumentError('Track ids must be positive integers');
             }
 
+            let batchSize: number | undefined;
+            if (typeof payload.batchSize !== 'undefined') {
+                if (!Number.isInteger(payload.batchSize) || payload.batchSize <= 0) {
+                    throw new ArgumentError('Batch size must be a positive integer');
+                }
+                batchSize = payload.batchSize;
+            }
+
             const shapes = Array.isArray(payload.shapes) ? payload.shapes : [];
             const normalizedShapes = shapes.map((shape, index) => {
                 if (!Number.isInteger(shape.clientId)) {
@@ -724,11 +732,16 @@ export function implementJob(Job: typeof JobClass): typeof JobClass {
                 conversion_mode: string;
                 track_ids?: number[];
                 shapes?: typeof normalizedShapes;
+                batch_size?: number;
             } = {
                 frame: payload.frame,
                 target_frame: payload.targetFrame,
                 conversion_mode: conversionMode,
             };
+
+            if (typeof batchSize !== 'undefined') {
+                requestBody.batch_size = batchSize;
+            }
 
             if (normalizedTrackIds.length) {
                 requestBody.track_ids = normalizedTrackIds;

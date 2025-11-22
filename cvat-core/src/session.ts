@@ -507,6 +507,7 @@ export interface FunctionTrackerRunParams {
     trackIds?: number[];
     shapes?: TrackerRunShapePayload[];
     conversionMode?: TrackerConversionMode;
+    batchSize?: number;
 }
 
 export interface FunctionTrackerRunResult {

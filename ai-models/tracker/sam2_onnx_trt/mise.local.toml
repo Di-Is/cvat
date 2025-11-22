@@ -1,0 +1,14 @@
+[tasks.dc-post_create]
+run = [
+    "mise run dc-post_create-001_install_pre_commit_hook",
+    "mise run dc-post_create-1000_setup_chezmoi",
+]
+description = "Post create command for devcontainer"
+
+[tasks.dc-post_create-1000_setup_chezmoi]
+run = '.devcontainer/scripts/_pc_setup_chezmoi.sh ${GITHUB_USERNAME}'
+description = "Setup environment for chezmoi"
+
+[tools]
+devcontainer-cli = "latest"
+node = "24"

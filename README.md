@@ -164,6 +164,7 @@ CVAT 2.42.0 and later ship an optional `sam2-agent` profile with two services:
      -p model_id=str:facebook/sam2.1-hiera-small \
      -p device=str:cuda
    ```
+   Tracker登録時は `--supports-batched-tracker` が既定で有効になり、SAM2エージェントが即座にチャンクバッチ処理を受け付けます。独自実装でバッチ非対応の場合は `--no-supports-batched-tracker` を併用してください。
 3. Append the following variables to your root `.env` file so the UI, CLI, and agents reuse the same credentials and model settings (adjust as needed):
 
    ```dotenv
@@ -188,6 +189,16 @@ CVAT 2.42.0 and later ship an optional `sam2-agent` profile with two services:
    ```
 
    Follow the logs with `docker compose logs -f sam2-tracker-agent` or `docker compose logs -f sam2-interactor-agent`. When running strictly on CPU, set the relevant `SAM2_*_DEVICE=cpu` value and comment out the `deploy.resources.reservations.devices` block for that service inside `docker-compose.yml`.
+
+5. Tracker batch size is read from the server-side defaults (`CVAT_FUNCTION_TRACKER_DEFAULT_BATCH_SIZE`, `MAX_BATCH_SIZE`).  
+   To override per browser, open the dev tools console on the annotation page and run:
+   ```js
+   // Use batch size 32 (reload to apply)
+   localStorage.setItem('cvat.nativeTrackerBatchSize', '32');
+   // Reset to server default
+   localStorage.removeItem('cvat.nativeTrackerBatchSize');
+   ```
+   The UI only enables batch mode when the tracker function advertises `supports_batched_tracker=true`.
 
 For a deeper walkthrough (including environment variable explanations and troubleshooting), see the [Segment Anything 2 tracker guide](https://docs.cvat.ai/docs/annotation/auto-annotation/segment-anything-2-tracker/). The interactor agent follows the same CLI/compose flow and simply uses the `ai-models/interactor/sam2/func.py` implementation.
 

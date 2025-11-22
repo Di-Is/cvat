@@ -1,0 +1,27 @@
+services:
+  workspace:
+    build:
+      context: ../../..
+      dockerfile: .devcontainer/Dockerfile
+      args:
+        - USER_ID=1000
+    volumes:
+      # Workspace
+      - type: bind
+        source: ../../..
+        target: /home/ubuntu/workspace
+      - type: volume
+        source: dot_local
+        target: /home/ubuntu/.local
+      - type: volume
+        source: dot_config
+        target: /home/ubuntu/.config
+      - type: volume
+        source: vscode-server
+        target: /home/ubuntu/.vscode-server
+    tty: true
+
+volumes:
+  vscode-server:
+  dot_local:
+  dot_config:

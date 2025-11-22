@@ -149,7 +149,7 @@ They keep `function run-agent` online next to your OSS stack so you do not have 
    SAM2_TRACKER_FUNCTION_ID=<TRACKER_ID>
    SAM2_TRACKER_MODEL_ID=facebook/sam2.1-hiera-small
    SAM2_TRACKER_DEVICE=cuda
-   SAM2_TRACKER_EXTRA_AGENT_ARGS="-p cache_dir=str:/tmp/sam2"
+   SAM2_TRACKER_EXTRA_AGENT_ARGS="-p cache_dir=str:/tmp/sam2 --tracker-preload-chunks --include-fetch-metrics"
 
    SAM2_INTERACTOR_FUNCTION_ID=<INTERACTOR_ID>
    SAM2_INTERACTOR_MODEL_ID=facebook/sam2.1-hiera-small
@@ -160,7 +160,7 @@ They keep `function run-agent` online next to your OSS stack so you do not have 
    - `CVAT_AGENT_TOKEN` is forwarded to the containers as `CVAT_ACCESS_TOKEN`.
    - `SAM2_TRACKER_*` variables feed into `sam2-tracker-agent` (annotation actions).
    - `SAM2_INTERACTOR_*` variables feed into `sam2-interactor-agent` (AI Tools interactor).
-   - Either agent accepts `SAM2_*_FUNCTION_FILE` and `SAM2_*_EXTRA_AGENT_ARGS` overrides if you need to forward extra CLI flags to `func.py`.
+   - Either agent accepts `SAM2_*_FUNCTION_FILE` and `SAM2_*_EXTRA_AGENT_ARGS` overrides if you need to forward extra CLI flags to `func.py`. Use `--tracker-preload-chunks` to keep tracker chunks cached locally and `--include-fetch-metrics` to emit verbose dataset fetch telemetry for benchmarking.
 
 1. Build the image the first time (or whenever you edit the CLI / SAM2 code):
    ```sh

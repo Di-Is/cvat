@@ -6,7 +6,7 @@ import argparse
 import json
 import textwrap
 from collections.abc import Sequence
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 import cvat_sdk.auto_annotation as cvataa
 from cvat_sdk import Client, models
@@ -42,6 +42,22 @@ class FunctionCreateNative:
             "name",
             help="a human-readable name for the function",
         )
+        parser.add_argument(
+            "--supports-batched-tracker",
+            dest="supports_batched_tracker",
+            action="store_true",
+            default=None,
+            help=(
+                "Explicitly enable tracker batching support when creating tracker functions. "
+                "Enabled by default for SAM2 tracker specs."
+            ),
+        )
+        parser.add_argument(
+            "--no-supports-batched-tracker",
+            dest="supports_batched_tracker",
+            action="store_false",
+            help="Disable tracker batching capability when registering tracker functions.",
+        )
 
         configure_function_implementation_arguments(parser)
 
@@ -74,6 +90,7 @@ class FunctionCreateNative:
         *,
         name: str,
         function_loader: FunctionLoader,
+        supports_batched_tracker: Optional[bool] = None,
     ) -> None:
         function = function_loader.load()
 
@@ -98,6 +115,10 @@ class FunctionCreateNative:
         elif isinstance(spec, cvataa.TrackingFunctionSpec):
             remote_function["kind"] = FUNCTION_KIND_TRACKER
             remote_function["supported_shape_types"] = sorted(spec.supported_shape_types)
+            tracker_support_flag = supports_batched_tracker
+            if tracker_support_flag is None:
+                tracker_support_flag = True
+            remote_function["supports_batched_tracker"] = bool(tracker_support_flag)
         elif isinstance(spec, cvataa.InteractorFunctionSpec):
             remote_function["kind"] = FUNCTION_KIND_INTERACTOR
             remote_function.update(
@@ -191,6 +212,14 @@ class FunctionRunAgent:
             action="store_true",
             help="download tracker task media chunks when possible to speed up frame access",
         )
+        parser.add_argument(
+            "--include-fetch-metrics",
+            action="store_true",
+            help=(
+                "enable verbose tracker dataset fetch logs so benchmarking tools can "
+                "collect chunk cache metrics"
+            ),
+        )
 
     def execute(
         self,
@@ -202,6 +231,7 @@ class FunctionRunAgent:
         max_cache_tasks_with_chunks: int,
         max_cache_tasks_without_chunks: int,
         tracker_preload_chunks: bool,
+        include_fetch_metrics: bool,
     ) -> None:
         run_agent(
             client,
@@ -211,4 +241,5 @@ class FunctionRunAgent:
             max_tasks_with_chunks=max_cache_tasks_with_chunks,
             max_tasks_without_chunks=max_cache_tasks_without_chunks,
             tracker_allow_chunk_preload=tracker_preload_chunks,
+            tracker_verbose_logs=True if include_fetch_metrics else None,
         )

@@ -1,0 +1,36 @@
+services:
+  workspace:
+    volumes:
+      # uv caches for SAM2 ONNX/TRT agent builds inside devcontainer
+      - type: bind
+        source: ../../../.uv_cache
+        target: /home/ubuntu/workspace/ai-models/tracker/sam2_onnx_trt/.uv_cache
+      - type: bind
+        source: ../../../.uv_python
+        target: /home/ubuntu/workspace/ai-models/tracker/sam2_onnx_trt/.uv_python
+      - type: volume
+        source: sam2_onnx_trt_cache
+        target: /root/.cache
+      - type: volume
+        source: apt_list
+        target: /var/lib/apt/lists
+      - type: volume
+        source: apt_cache
+        target: /var/cache/apt/archives
+    environment:
+      - GITHUB_USERNAME=Di-Is
+      - UID=1000
+      - CHEZMOI_DOCKER=false
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${SAM2_INTERACTOR_GPU_COUNT:-1}
+              capabilities:
+                - gpu
+                
+volumes:
+  apt_list:
+  apt_cache:
+  sam2_onnx_trt_cache:

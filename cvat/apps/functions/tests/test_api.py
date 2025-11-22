@@ -4,9 +4,9 @@ import contextlib
 import itertools
 import json
 import uuid
-from urllib.parse import quote
-
+from datetime import timedelta
 from unittest import mock
+from urllib.parse import quote
 
 from django.core.management import call_command
 from rest_framework import status
@@ -32,6 +32,7 @@ from cvat.apps.functions.models import (
     AnnotationRequestStatus,
     Function,
     FunctionProvider,
+    FunctionRunStatus,
 )
 from cvat.apps.lambda_manager.models import FunctionKind
 
@@ -61,6 +62,7 @@ class FunctionsApiTests(ApiTestBase):
         *,
         supported_shape_types: list[str] | None = None,
         kind: str = FunctionKind.TRACKER,
+        supports_batched_tracker: bool = False,
     ) -> Function:
         return Function.objects.create(
             owner=owner,
@@ -69,6 +71,7 @@ class FunctionsApiTests(ApiTestBase):
             provider=FunctionProvider.NATIVE,
             kind=kind,
             supported_shape_types=supported_shape_types or ["rectangle"],
+            supports_batched_tracker=supports_batched_tracker,
         )
 
     def _create_annotation_request(
@@ -80,15 +83,18 @@ class FunctionsApiTests(ApiTestBase):
         status: str = AnnotationRequestStatus.PENDING,
         progress: float = 0.0,
         parameters: dict | None = None,
+        run_status: FunctionRunStatus | None = None,
     ) -> AnnotationRequest:
         return AnnotationRequest.objects.create(
             function=function,
             owner=function.owner,
             task=self.task,
+            job=self.job,
             category=category,
             type=req_type,
             status=status,
             progress=progress,
+            run_status=run_status,
             parameters=parameters
             or {
                 "task": self.task.id,
@@ -96,6 +102,46 @@ class FunctionsApiTests(ApiTestBase):
                 "type": "init_tracking",
                 "shapes": [],
             },
+        )
+
+    def _create_run_status(
+        self,
+        *,
+        function: Function,
+        run_id: uuid.UUID,
+        status: str = AnnotationRequestStatus.PENDING,
+        total_requests: int = 1,
+        completed_requests: int = 0,
+        failed_requests: int = 0,
+        cancelled_requests: int = 0,
+        expected_frames: int | None = None,
+        completed_frames: int = 0,
+        progress: float = 0.0,
+        active_request_id: uuid.UUID | None = None,
+        active_request_type: str = "",
+        active_request_progress: float = 0.0,
+        active_request_frame_span: int = 0,
+        failed_request_id: uuid.UUID | None = None,
+    ) -> FunctionRunStatus:
+        return FunctionRunStatus.objects.create(
+            run_id=run_id,
+            owner=function.owner,
+            function=function,
+            task=self.task,
+            job=self.job,
+            status=status,
+            total_requests=total_requests,
+            completed_requests=completed_requests,
+            failed_requests=failed_requests,
+            cancelled_requests=cancelled_requests,
+            expected_frames=expected_frames,
+            completed_frames=completed_frames,
+            progress=progress,
+            active_request_id=active_request_id,
+            active_request_type=active_request_type,
+            active_request_progress=active_request_progress,
+            active_request_frame_span=active_request_frame_span,
+            failed_request_id=failed_request_id,
         )
 
     def test_list_functions_filters_by_owner(self):
@@ -251,19 +297,13 @@ class FunctionsApiTests(ApiTestBase):
     def test_run_status_endpoint_reports_progress(self):
         function = self._create_function(self.owner)
         run_id = uuid.uuid4()
-
-        base_parameters = {
-            "task": self.task.id,
-            "frame": 0,
-            "type": "init_tracking",
-            "shapes": [],
-            "function_run_id": str(run_id),
-        }
-
-        request = self._create_annotation_request(
+        summary = self._create_run_status(
             function=function,
-            status=AnnotationRequestStatus.PENDING,
-            parameters=base_parameters,
+            run_id=run_id,
+            status=AnnotationRequestStatus.RUNNING,
+            total_requests=2,
+            completed_requests=0,
+            progress=0.25,
         )
 
         response = self._get_request(f"/api/functions/runs/{run_id}", self.owner)
@@ -271,19 +311,22 @@ class FunctionsApiTests(ApiTestBase):
         payload = response.json()
         self.assertEqual(payload["status"], AnnotationRequestStatus.RUNNING)
 
-        request.status = AnnotationRequestStatus.DONE
-        request.progress = 1.0
-        request.save()
+        summary.status = AnnotationRequestStatus.DONE
+        summary.completed_requests = 2
+        summary.progress = 1.0
+        summary.save(update_fields=["status", "completed_requests", "progress"])
 
         response = self._get_request(f"/api/functions/runs/{run_id}", self.owner)
         payload = response.json()
         self.assertEqual(payload["status"], AnnotationRequestStatus.DONE)
         self.assertEqual(payload["progress"], 1.0)
 
-        self._create_annotation_request(
-            function=function,
-            status=AnnotationRequestStatus.FAILED,
-            parameters={**base_parameters, "frame": 1},
+        summary.status = AnnotationRequestStatus.FAILED
+        summary.failed_requests = 1
+        summary.failed_request_id = uuid.uuid4()
+        summary.progress = 0.5
+        summary.save(
+            update_fields=["status", "failed_requests", "failed_request_id", "progress"]
         )
 
         response = self._get_request(f"/api/functions/runs/{run_id}", self.owner)
@@ -291,32 +334,61 @@ class FunctionsApiTests(ApiTestBase):
         self.assertEqual(payload["status"], AnnotationRequestStatus.FAILED)
         self.assertAlmostEqual(payload["progress"], 0.5)
 
+    def test_run_status_endpoint_accounts_for_batched_tracking(self):
+        function = self._create_function(self.owner)
+        run_id = uuid.uuid4()
+        active_request_id = uuid.uuid4()
+        summary = self._create_run_status(
+            function=function,
+            run_id=run_id,
+            status=AnnotationRequestStatus.RUNNING,
+            expected_frames=6,
+            completed_frames=5,
+            total_requests=3,
+            completed_requests=2,
+            progress=5 / 6,
+            active_request_id=active_request_id,
+            active_request_type="track",
+            active_request_progress=0.5,
+            active_request_frame_span=2,
+        )
+
+        response = self._get_request(f"/api/functions/runs/{run_id}", self.owner)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(payload["status"], AnnotationRequestStatus.RUNNING)
+        self.assertAlmostEqual(payload["progress"], summary.progress)
+
     def test_run_status_endpoint_reports_cancelled(self):
         function = self._create_function(self.owner)
         run_id = uuid.uuid4()
-        parameters = {
-            "task": self.task.id,
-            "frame": 0,
-            "type": "init_tracking",
-            "shapes": [],
-            "function_run_id": str(run_id),
-        }
-
-        self._create_annotation_request(
+        summary = self._create_run_status(
             function=function,
+            run_id=run_id,
             status=AnnotationRequestStatus.CANCELLED,
-            parameters=parameters,
+            progress=0.4,
+            total_requests=4,
+            completed_requests=2,
+            cancelled_requests=2,
         )
 
         response = self._get_request(f"/api/functions/runs/{run_id}", self.owner)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         payload = response.json()
         self.assertEqual(payload["status"], AnnotationRequestStatus.CANCELLED)
-        self.assertEqual(payload["progress"], 0.0)
+        self.assertEqual(payload["progress"], summary.progress)
 
     def test_run_cancel_endpoint_cancels_requests_and_rolls_back(self):
         function = self._create_function(self.owner)
         run_id = uuid.uuid4()
+        summary = self._create_run_status(
+            function=function,
+            run_id=run_id,
+            status=AnnotationRequestStatus.RUNNING,
+            total_requests=2,
+            completed_requests=0,
+            progress=0.1,
+        )
         base_parameters = {
             "task": self.task.id,
             "frame": 0,
@@ -329,11 +401,13 @@ class FunctionsApiTests(ApiTestBase):
             function=function,
             status=AnnotationRequestStatus.PENDING,
             parameters=base_parameters,
+            run_status=summary,
         )
         running_request = self._create_annotation_request(
             function=function,
             status=AnnotationRequestStatus.RUNNING,
             parameters={**base_parameters, "frame": 1},
+            run_status=summary,
         )
 
         track = LabeledTrack.objects.create(
@@ -371,6 +445,11 @@ class FunctionsApiTests(ApiTestBase):
     def test_run_cancel_endpoint_requires_owner(self):
         function = self._create_function(self.owner)
         run_id = uuid.uuid4()
+        summary = self._create_run_status(
+            function=function,
+            run_id=run_id,
+            status=AnnotationRequestStatus.RUNNING,
+        )
 
         self._create_annotation_request(
             function=function,
@@ -382,6 +461,7 @@ class FunctionsApiTests(ApiTestBase):
                 "shapes": [],
                 "function_run_id": str(run_id),
             },
+            run_status=summary,
         )
 
         response = self._post_request(
@@ -393,6 +473,14 @@ class FunctionsApiTests(ApiTestBase):
     def test_run_cancel_endpoint_conflict_for_completed_run(self):
         function = self._create_function(self.owner)
         run_id = uuid.uuid4()
+        summary = self._create_run_status(
+            function=function,
+            run_id=run_id,
+            status=AnnotationRequestStatus.DONE,
+            total_requests=1,
+            completed_requests=1,
+            progress=1.0,
+        )
 
         self._create_annotation_request(
             function=function,
@@ -404,6 +492,7 @@ class FunctionsApiTests(ApiTestBase):
                 "shapes": [],
                 "function_run_id": str(run_id),
             },
+            run_status=summary,
         )
 
         response = self._post_request(
@@ -427,6 +516,32 @@ class FunctionsApiTests(ApiTestBase):
         if callable(close):
             close()
         self.assertTrue(any(b"event: newrequest" in chunk for chunk in chunks))
+
+    def test_queue_watch_stream_closes_after_timeout(self):
+        function = self._create_function(self.owner)
+        self._create_annotation_request(function=function)
+
+        ttl = timedelta(milliseconds=20)
+        keepalive = timedelta(milliseconds=5)
+
+        with mock.patch(
+            "cvat.apps.functions.views._QUEUE_WATCH_STREAM_TTL", ttl
+        ), mock.patch(
+            "cvat.apps.functions.views._QUEUE_WATCH_KEEPALIVE_INTERVAL", keepalive
+        ), mock.patch(
+            "cvat.apps.functions.views.QUEUE_WATCH_POLL_INTERVAL", 0.01
+        ), mock.patch(
+            "cvat.apps.functions.views.close_old_connections"
+        ) as mock_close_connections:
+            response = self._get_request(
+                f"/api/functions/queues/function:{function.id}/watch",
+                self.owner,
+            )
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            stream = iter(response.streaming_content)
+            list(stream)
+
+        mock_close_connections.assert_called_once()
 
     @mock.patch("cvat.apps.functions.result_handlers.dm.task.patch_task_data")
     def test_queue_complete_applies_annotations(self, mock_patch_task_data):
@@ -728,6 +843,208 @@ class FunctionsApiTests(ApiTestBase):
             TrackedShape.objects.filter(track=track).order_by("frame").values_list("frame", flat=True)
         )
         self.assertEqual(tracked_frames, [0, 1, 2, 2])
+
+    def test_tracker_action_batches_frames_when_requested(self):
+        function = self._create_function(
+            self.owner,
+            supported_shape_types=["polygon"],
+            supports_batched_tracker=True,
+        )
+        track = self._create_track(frame=0)
+
+        response = self._post_request(
+            f"/api/jobs/{self.job.id}/functions/{function.id}/tracker-actions",
+            self.owner,
+            data={"frame": 0, "target_frame": 3, "track_ids": [track.id], "batch_size": 2},
+        )
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+
+        init_request = AnnotationRequest.objects.get(type="init_tracking")
+        acquire_response = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/acquire",
+            self.owner,
+            data={
+                "agent_id": "tracker-agent",
+                "request_category": AnnotationRequestCategory.BATCH,
+            },
+        )
+        self.assertEqual(acquire_response.status_code, status.HTTP_200_OK)
+
+        complete_init = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/{init_request.id}/complete",
+            self.owner,
+            data={"agent_id": "tracker-agent", "states": ["state-1"]},
+        )
+        self.assertEqual(complete_init.status_code, status.HTTP_200_OK)
+
+        first_track_request = AnnotationRequest.objects.get(type="track", parameters__frame=1)
+        self.assertEqual(first_track_request.parameters["frames"], [1, 2])
+        self.assertEqual(first_track_request.parameters["pending_frames"], [3])
+
+        acquire_track = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/acquire",
+            self.owner,
+            data={
+                "agent_id": "tracker-agent",
+                "request_category": AnnotationRequestCategory.BATCH,
+            },
+        )
+        self.assertEqual(acquire_track.status_code, status.HTTP_200_OK)
+
+        complete_first_chunk = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/{first_track_request.id}/complete",
+            self.owner,
+            data={
+                "agent_id": "tracker-agent",
+                "states": ["state-1"],
+                "frames": [
+                    {
+                        "frame": 1,
+                        "shapes": [{"type": "polygon", "points": [0, 0, 11, 0, 11, 11, 0, 11]}],
+                    },
+                    {
+                        "frame": 2,
+                        "shapes": [{"type": "polygon", "points": [0, 0, 12, 0, 12, 12, 0, 12]}],
+                    },
+                ],
+            },
+        )
+        self.assertEqual(complete_first_chunk.status_code, status.HTTP_200_OK)
+
+        second_track_request = AnnotationRequest.objects.get(type="track", parameters__frame=3)
+        self.assertEqual(second_track_request.parameters["frames"], [3])
+
+        acquire_second = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/acquire",
+            self.owner,
+            data={
+                "agent_id": "tracker-agent",
+                "request_category": AnnotationRequestCategory.BATCH,
+            },
+        )
+        self.assertEqual(acquire_second.status_code, status.HTTP_200_OK)
+
+        complete_second_chunk = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/{second_track_request.id}/complete",
+            self.owner,
+            data={
+                "agent_id": "tracker-agent",
+                "states": ["state-1"],
+                "frames": [
+                    {
+                        "frame": 3,
+                        "shapes": [{"type": "polygon", "points": [0, 0, 13, 0, 13, 13, 0, 13]}],
+                    },
+                ],
+            },
+        )
+        self.assertEqual(complete_second_chunk.status_code, status.HTTP_200_OK)
+
+        tracked_frames = list(
+            TrackedShape.objects.filter(track=track).order_by("frame").values_list("frame", flat=True)
+        )
+        self.assertEqual(tracked_frames, [0, 1, 2, 3, 3])
+
+    def test_tracker_action_accepts_explicit_frame_list(self):
+        function = self._create_function(
+            self.owner,
+            supported_shape_types=["polygon"],
+            supports_batched_tracker=True,
+        )
+        track = self._create_track(frame=0)
+
+        response = self._post_request(
+            f"/api/jobs/{self.job.id}/functions/{function.id}/tracker-actions",
+            self.owner,
+            data={
+                "frame": 0,
+                "target_frame": 5,
+                "track_ids": [track.id],
+                "frames": [0, 2, 5],
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+
+        init_request = AnnotationRequest.objects.get(type="init_tracking")
+        acquire_response = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/acquire",
+            self.owner,
+            data={
+                "agent_id": "tracker-agent",
+                "request_category": AnnotationRequestCategory.BATCH,
+            },
+        )
+        self.assertEqual(acquire_response.status_code, status.HTTP_200_OK)
+
+        complete_init = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/{init_request.id}/complete",
+            self.owner,
+            data={"agent_id": "tracker-agent", "states": ["state-1"]},
+        )
+        self.assertEqual(complete_init.status_code, status.HTTP_200_OK)
+
+        first_track_request = AnnotationRequest.objects.get(type="track", parameters__frame=2)
+        self.assertEqual(first_track_request.parameters["frames"], [2, 5])
+        self.assertEqual(first_track_request.parameters["pending_frames"], [])
+
+        self.assertEqual(first_track_request.parameters["frames"], [2, 5])
+        self.assertEqual(first_track_request.parameters["pending_frames"], [])
+
+        acquire_first = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/acquire",
+            self.owner,
+            data={
+                "agent_id": "tracker-agent",
+                "request_category": AnnotationRequestCategory.BATCH,
+            },
+        )
+        self.assertEqual(acquire_first.status_code, status.HTTP_200_OK)
+        complete_first = self._post_request(
+            f"/api/functions/queues/function:{function.id}/requests/{first_track_request.id}/complete",
+            self.owner,
+            data={
+                "agent_id": "tracker-agent",
+                "states": ["state-1"],
+                "frames": [
+                    {
+                        "frame": 2,
+                        "shapes": [{"type": "polygon", "points": [0, 0, 11, 0, 11, 11, 0, 11]}],
+                    },
+                    {
+                        "frame": 5,
+                        "shapes": [{"type": "polygon", "points": [0, 0, 12, 0, 12, 12, 0, 12]}],
+                    },
+                ],
+            },
+        )
+        self.assertEqual(complete_first.status_code, status.HTTP_200_OK)
+
+        tracked_frames = list(
+            TrackedShape.objects.filter(track=track).order_by("frame").values_list("frame", flat=True)
+        )
+        self.assertIn(2, tracked_frames)
+        self.assertGreaterEqual(tracked_frames.count(5), 2)
+
+    def test_tracker_action_rejects_invalid_frame_list(self):
+        function = self._create_function(
+            self.owner,
+            supported_shape_types=["polygon"],
+            supports_batched_tracker=True,
+        )
+        track = self._create_track(frame=0)
+
+        response = self._post_request(
+            f"/api/jobs/{self.job.id}/functions/{function.id}/tracker-actions",
+            self.owner,
+            data={
+                "frame": 0,
+                "target_frame": 5,
+                "track_ids": [track.id],
+                "frames": [0, 2, 4],
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("frames", response.json())
 
     def test_tracker_action_accepts_polygon_shapes(self):
         function = self._create_function(self.owner, supported_shape_types=["polygon"])

@@ -5,6 +5,7 @@ import threading
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
+import uuid
 
 from django.conf import settings
 from django.utils import timezone
@@ -20,6 +21,7 @@ from .models import (
     AnnotationRequestStatus,
     Function,
 )
+from .run_status import create_interactor_run_status
 
 
 class InteractorRequestTimeoutError(Exception):
@@ -127,6 +129,13 @@ def start_interactor_request(
     _validate_points(function, payload)
     label_id = _validate_label(job, payload.label_id)
 
+    run_uuid = uuid.uuid4()
+    run_status = create_interactor_run_status(
+        run_uuid=run_uuid,
+        function=function,
+        job=job,
+    )
+
     parameters: dict[str, Any] = {
         "type": "interact",
         "task": task.id,
@@ -138,6 +147,7 @@ def start_interactor_request(
         "obj_bbox": payload.obj_bbox,
         "label_id": label_id,
         "start_with_box": payload.start_with_box,
+        "function_run_id": str(run_uuid),
     }
 
     annotation_request = AnnotationRequest.objects.create(
@@ -147,6 +157,7 @@ def start_interactor_request(
         job=job,
         category=AnnotationRequestCategory.INTERACTIVE,
         type="interact",
+        run_status=run_status,
         parameters=parameters,
     )
 

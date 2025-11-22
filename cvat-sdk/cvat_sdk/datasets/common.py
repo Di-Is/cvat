@@ -41,6 +41,13 @@ class MediaElement(metaclass=abc.ABCMeta):
         """
         ...
 
+    def load_encoded_bytes(self) -> bytes:
+        """
+        Returns the encoded image bytes if available.
+        Default implementation raises NotImplementedError.
+        """
+        raise NotImplementedError("Encoded bytes are not provided for this media element")
+
 
 @attrs.frozen
 class Sample:
@@ -71,5 +78,18 @@ class MediaDownloadPolicy(Enum):
     PRELOAD_ALL = auto()
     """Download and cache all media data when the dataset object is created."""
 
+    PREFETCH_CHUNKS_ONCE = auto()
+    """Download each chunk once when a frame from it is needed, then reuse the cached chunk."""
+
     FETCH_FRAMES_ON_DEMAND = auto()
     """Download the media element for each frame whenever MediaElement.load_* is invoked."""
+
+
+class ChunkCacheMode(Enum):
+    """Defines when dataset chunks are cached while iterating over frames."""
+
+    PREFETCH_CHUNKS_ONCE = auto()
+    """Download each chunk once per run and reuse the cached chunk afterwards."""
+
+    FETCH_ON_DEMAND = auto()
+    """Fetch frames as-needed without caching chunk archives locally."""

@@ -202,13 +202,19 @@ export default class NativeFunctionTrackerAction extends BaseCollectionAction {
         }
 
         onProgress('Submitting SAM2 tracker request…', 20);
-        const result = await this.#instance.runFunctionTrackerAction(this.#function.id, {
+        const trackerParams: Parameters<Job['runFunctionTrackerAction']>[1] = {
             frame: frameData.number,
             targetFrame: this.#targetFrame,
             trackIds: uniqueTrackIds.size ? Array.from(uniqueTrackIds) : undefined,
             shapes: shapePayloads,
             conversionMode: this.#conversionMode,
-        });
+        };
+        const batchSize = this.getTrackerBatchSize();
+        if (typeof batchSize === 'number') {
+            trackerParams.batchSize = batchSize;
+        }
+
+        const result = await this.#instance.runFunctionTrackerAction(this.#function.id, trackerParams);
 
         await this.waitForRun(result.runId, onProgress, cancelled);
         if (!cancelled()) {
@@ -356,5 +362,22 @@ export default class NativeFunctionTrackerAction extends BaseCollectionAction {
 
     private async sleep(duration: number): Promise<void> {
         await new Promise((resolve) => setTimeout(resolve, duration));
+    }
+
+    private getTrackerBatchSize(): number | undefined {
+        try {
+            const rawValue = window.localStorage?.getItem('cvat.nativeTrackerBatchSize');
+            if (!rawValue) {
+                return undefined;
+            }
+
+            const parsed = Number(rawValue);
+            if (!Number.isInteger(parsed) || parsed <= 0) {
+                return undefined;
+            }
+            return parsed;
+        } catch {
+            return undefined;
+        }
     }
 }

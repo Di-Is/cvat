@@ -8,6 +8,7 @@ import concurrent.futures
 import contextlib
 import json
 import multiprocessing
+import os
 import random
 import secrets
 import shutil
@@ -60,6 +61,22 @@ _JITTER_AMOUNT = 0.15
 _UPDATE_INTERVAL = timedelta(seconds=30)
 
 _MAX_AGE_OF_TRACKING_STATE = timedelta(hours=8)
+
+
+def _env_flag(name: str) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return False
+
+    normalized = value.strip().lower()
+    return normalized not in {"", "0", "false", "off", "no"}
+
+
+_SAM2_TRACKER_VERBOSE = _env_flag("SAM2_TRACKER_VERBOSE")
+_TRACKER_PREFETCH_FRAMES = bool(int(os.getenv("SAM2_TRACKER_PREFETCH_FRAMES", "1")))
+_TRACKER_PREFETCH_PARALLEL = int(os.getenv("SAM2_TRACKER_PREFETCH_PARALLEL", "0"))
+_TRACKER_DOUBLE_BUFFER = _env_flag("SAM2_TRACKER_DOUBLE_BUFFER")
+_TRACKER_GPU_DOUBLE_BUFFER = _env_flag("SAM2_TRACKER_GPU_DOUBLE_BUFFER")
 
 
 class _RecoverableExecutor:
@@ -218,25 +235,154 @@ def _worker_job_track(
 
     pp_image = _current_function.preprocess_image(_TrackingFunctionContextImpl(), image)
 
-    def track(state_id):
+    batch_entries: list[tuple[_TrackingFunctionShapeContextImpl, Any, str]] = []
+    for state_id in states:
         inner_state, original_shape_type = _tracking_states.retrieve(
             state_id=state_id, task_id=task_id, image_dims=image.size
         )
-
-        output_shape = _current_function.track(
-            _TrackingFunctionShapeContextImpl(original_shape_type=original_shape_type),
-            pp_image,
-            inner_state,
+        batch_entries.append(
+            (
+                _TrackingFunctionShapeContextImpl(original_shape_type=original_shape_type),
+                inner_state,
+                original_shape_type,
+            )
         )
 
-        if output_shape and output_shape.type != original_shape_type:
+    context_state_pairs = [(context, inner_state) for context, inner_state, _ in batch_entries]
+
+    if hasattr(_current_function, "track_batch"):
+        predictions = _current_function.track_batch(context_state_pairs, pp_image)  # type: ignore[attr-defined]
+    else:
+        predictions = [
+            _current_function.track(context, pp_image, inner_state)
+            for context, inner_state in context_state_pairs
+        ]
+
+    if len(predictions) != len(batch_entries):
+        raise cvataa.BadFunctionError(
+            "Tracker returned an unexpected number of predictions in track_batch()"
+        )
+
+    normalized_predictions: list[Optional[cvataa.TrackableShape]] = []
+    for prediction, (_, _, original_shape_type) in zip(predictions, batch_entries):
+        if prediction and prediction.type != original_shape_type:
             raise cvataa.BadFunctionError(
-                f"function output shape of type {output_shape.type!r}, "
+                f"function output shape of type {prediction.type!r}, "
                 f"but original shape was of type {original_shape_type!r}"
             )
-        return output_shape
+        normalized_predictions.append(prediction)
+    return normalized_predictions
 
-    return list(map(track, states))
+
+def _worker_job_track_double_buffer(
+    task_id: int, frames_and_images: list[tuple[int, PIL.Image.Image]], states: list[str]
+) -> tuple[list[dict[str, Any]], list[float]]:
+    """
+    Track a chunk with double-buffered preprocess:
+    - preprocess next frame on a background thread while tracking the current frame
+    - CPU decode/resize/normalize happens in the background thread (fallback)
+    - If SAM2_TRACKER_GPU_DOUBLE_BUFFER is set, use preprocess_image (fast-preprocess) in the
+      background thread instead of CPU transforms, and rely on ready_event for stream sync.
+    """
+    global _tracking_states, _tracking_state_id_generator
+    if "_tracking_states" not in globals() or not isinstance(_tracking_states, _TrackingStateContainer):
+        _tracking_states = _TrackingStateContainer()
+        _tracking_state_id_generator = _default_tracking_state_id_generator
+
+    supports_gpu_pp = _TRACKER_GPU_DOUBLE_BUFFER and hasattr(_current_function, "preprocess_image")
+    supports_cpu_pp = hasattr(_current_function, "cpu_preprocess_image") and hasattr(
+        _current_function, "forward_preprocessed_tensor"
+    )
+    if not (supports_gpu_pp or supports_cpu_pp):
+        raise cvataa.BadFunctionError(
+            "Double-buffer path requires preprocess_image or cpu_preprocess_image support"
+        )
+
+    _tracking_states.prune()
+    if not frames_and_images:
+        return [], []
+
+    first_image = frames_and_images[0][1]
+    batch_entries: list[tuple[_TrackingFunctionShapeContextImpl, Any, str]] = []
+    for state_id in states:
+        inner_state, original_shape_type = _tracking_states.retrieve(
+            state_id=state_id, task_id=task_id, image_dims=first_image.size
+        )
+        ctx = _TrackingFunctionShapeContextImpl(original_shape_type=original_shape_type)
+        batch_entries.append((ctx, inner_state, original_shape_type))
+
+    context_state_pairs = [(context, inner_state) for context, inner_state, _ in batch_entries]
+
+    def _preprocess_cpu(img: PIL.Image.Image) -> Any:
+        return _current_function.cpu_preprocess_image(_TrackingFunctionContextImpl(), img)
+
+    def _preprocess_gpu(img: PIL.Image.Image):
+        return _current_function.preprocess_image(_TrackingFunctionContextImpl(), img)
+
+    frame_payloads: list[dict[str, Any]] = []
+    frame_latencies_ms: list[float] = []
+
+    # First frame preprocess happens synchronously to prime the buffers.
+    if supports_gpu_pp:
+        pp_current = _preprocess_gpu(frames_and_images[0][1])
+        size_current = None
+    else:
+        pp_current, size_current = _preprocess_cpu(frames_and_images[0][1])
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        for idx, (frame_index, image) in enumerate(frames_and_images):
+            pp_future: Optional[concurrent.futures.Future] = None
+            if idx + 1 < len(frames_and_images):
+                pp_future = pool.submit(
+                    _preprocess_gpu if supports_gpu_pp else _preprocess_cpu,
+                    frames_and_images[idx + 1][1],
+                )
+
+            frame_start = time.perf_counter()
+            if supports_gpu_pp:
+                pp_image = pp_current
+            else:
+                pp_image = _current_function.forward_preprocessed_tensor(
+                    pp_current, original_size=size_current
+                )
+            predictions = (
+                _current_function.track_batch(context_state_pairs, pp_image)
+                if hasattr(_current_function, "track_batch")
+                else [
+                    _current_function.track(context, pp_image, inner_state)
+                    for context, inner_state in context_state_pairs
+                ]
+            )
+
+            if len(predictions) != len(batch_entries):
+                raise cvataa.BadFunctionError(
+                    "Tracker returned an unexpected number of predictions in track_batch()"
+                )
+
+            normalized_predictions: list[Optional[cvataa.TrackableShape]] = []
+            for prediction, (_, _, original_shape_type) in zip(predictions, batch_entries):
+                if prediction and prediction.type != original_shape_type:
+                    raise cvataa.BadFunctionError(
+                        f"function output shape of type {prediction.type!r}, "
+                        f"but original shape was of type {original_shape_type!r}"
+                    )
+                normalized_predictions.append(prediction)
+
+            frame_payloads.append(
+                {
+                    "frame": frame_index,
+                    "shapes": [attrs.asdict(shape) if shape else None for shape in normalized_predictions],
+                }
+            )
+            frame_latencies_ms.append(round((time.perf_counter() - frame_start) * 1000, 3))
+
+            if pp_future is not None:
+                if supports_gpu_pp:
+                    pp_current = pp_future.result()
+                else:
+                    pp_current, size_current = pp_future.result()
+
+    return frame_payloads, frame_latencies_ms
 
 
 def _worker_job_interact(
@@ -431,39 +577,47 @@ class _InteractorDatasetRepository(_DatasetRepositoryBase):
 
 class _TrackerDatasetRepository(_DatasetRepositoryBase):
     def get(self, task_id: int, *, allow_chunks: bool = False) -> cvatds.TaskDataset:
-        return super().get(task_id, allow_chunks=allow_chunks)
+        mode = (
+            cvatds.ChunkCacheMode.PREFETCH_CHUNKS_ONCE
+            if allow_chunks
+            else cvatds.ChunkCacheMode.FETCH_ON_DEMAND
+        )
+        return super().get(task_id, chunk_cache_mode=mode)
 
     def _build_dataset(self, task_id: int, **kwargs) -> cvatds.TaskDataset:
-        allow_chunks = kwargs.get("allow_chunks", False)
-        start_ts = time.perf_counter()
-        if allow_chunks:
-            try:
-                dataset = cvatds.TaskDataset(
-                    self._client,
-                    task_id,
-                    load_annotations=False,
-                    media_download_policy=cvatds.MediaDownloadPolicy.PRELOAD_ALL,
-                )
-                elapsed = time.perf_counter() - start_ts
-                self._client.logger.info(
-                    "Preloaded tracker dataset for task %d (%.2fs)", task_id, elapsed
-                )
-                return dataset
-            except UnsupportedDatasetError:
-                self._client.logger.warning(
-                    "Task %d does not support tracker chunk preloading; falling back to on-demand frames",
-                    task_id,
-                )
-
-        dataset = cvatds.TaskDataset(
-            self._client,
-            task_id,
-            load_annotations=False,
-            media_download_policy=cvatds.MediaDownloadPolicy.FETCH_FRAMES_ON_DEMAND,
+        chunk_cache_mode: cvatds.ChunkCacheMode = kwargs.get(
+            "chunk_cache_mode", cvatds.ChunkCacheMode.FETCH_ON_DEMAND
         )
+        start_ts = time.perf_counter()
+        try:
+            dataset = cvatds.TaskDataset(
+                self._client,
+                task_id,
+                load_annotations=False,
+                chunk_cache_mode=chunk_cache_mode,
+            )
+        except UnsupportedDatasetError:
+            if chunk_cache_mode != cvatds.ChunkCacheMode.PREFETCH_CHUNKS_ONCE:
+                raise
+            self._client.logger.warning(
+                "Task %d does not support tracker chunk preloading; falling back to on-demand frames",
+                task_id,
+            )
+            dataset = cvatds.TaskDataset(
+                self._client,
+                task_id,
+                load_annotations=False,
+                chunk_cache_mode=cvatds.ChunkCacheMode.FETCH_ON_DEMAND,
+            )
+
         elapsed = time.perf_counter() - start_ts
+        mode_label = (
+            "lazy-chunk"
+            if dataset.chunk_cache_mode == cvatds.ChunkCacheMode.PREFETCH_CHUNKS_ONCE
+            else "on-demand"
+        )
         self._client.logger.info(
-            "Prepared tracker dataset for task %d (%.2fs)", task_id, elapsed
+            "Prepared %s tracker dataset for task %d (%.2fs)", mode_label, task_id, elapsed
         )
         return dataset
 
@@ -577,6 +731,7 @@ class _Agent:
         max_tasks_with_chunks: int = 1,
         max_tasks_without_chunks: int = 10,
         tracker_allow_chunk_preload: bool = False,
+        tracker_verbose_logs: bool | None = None,
     ):
         self._rng = random.Random()  # nosec
 
@@ -603,6 +758,9 @@ class _Agent:
         self._interactor_datasets = _InteractorDatasetRepository(self._client)
         self._tracker_datasets = _TrackerDatasetRepository(self._client)
         self._tracker_allow_chunk_preload = tracker_allow_chunk_preload
+        if tracker_verbose_logs is None:
+            tracker_verbose_logs = _SAM2_TRACKER_VERBOSE
+        self._tracker_verbose_logs = tracker_verbose_logs
         self._task_cache_limiter = _TaskCacheLimiter(
             client,
             max_tasks_with_chunks=max_tasks_with_chunks,
@@ -1131,12 +1289,193 @@ class _Agent:
         else:
             raise _BadArError(f"unsupported type: {ar_params['type']!r}")
 
+    def _tracker_log_context(
+        self,
+        *,
+        ar_id: str | None = None,
+        ar_params: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        context: dict[str, Any] = {}
+        if ar_id:
+            context["ar_id"] = ar_id
+        if ar_params:
+            context["ar_type"] = ar_params.get("type")
+            context["task_id"] = ar_params.get("task")
+            context["job_id"] = ar_params.get("job")
+            run_id = ar_params.get("function_run_id") or ar_params.get("run_id")
+            if run_id:
+                context["function_run_id"] = run_id
+            track_ids = ar_params.get("track_ids")
+            if track_ids:
+                context["track_ids"] = track_ids
+            target_frame = ar_params.get("target_frame")
+            if target_frame is not None:
+                context["target_frame"] = target_frame
+        return context
+
+    def _log_tracker_event(
+        self,
+        phase: str,
+        *,
+        context: Optional[dict[str, Any]] = None,
+        **payload: Any,
+    ) -> None:
+        if not self._tracker_verbose_logs:
+            return
+
+        record = {"component": "sam2_tracker", "phase": phase}
+        if context:
+            for key, value in context.items():
+                if value is not None:
+                    record[key] = value
+        record.update(payload)
+        self._client.logger.info(
+            "SAM2_TRACKER_LOG %s", json.dumps(record, separators=(",", ":"))
+        )
+
+    def _tracker_frame_indexes(self, ar_params: dict[str, Any]) -> list[int]:
+        frames = ar_params.get("frames")
+        normalized: list[int] = []
+        if isinstance(frames, list):
+            for value in frames:
+                try:
+                    normalized.append(int(value))
+                except (TypeError, ValueError):
+                    continue
+
+        if normalized:
+            return normalized
+
+        try:
+            frame_index = int(ar_params["frame"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise _BadArError("AR is missing a valid frame index") from exc
+        return [frame_index]
+
+    def _load_tracker_image(
+        self,
+        sample,
+        *,
+        ar_type: str,
+        task_id: int,
+        dataset: Optional[cvatds.TaskDataset] = None,
+        log_context: Optional[dict[str, Any]] = None,
+    ) -> PIL.Image.Image:
+        metadata: Optional[dict[str, Any]] = None
+        metadata_internal: dict[str, Any] = {}
+        if self._tracker_verbose_logs and dataset is not None:
+            metadata, metadata_internal = self._build_dataset_fetch_metadata(
+                dataset, sample.frame_index
+            )
+
+        if not self._tracker_verbose_logs:
+            return sample.media.load_image()
+
+        chunk_cached_before = metadata_internal.get("chunk_cached_before")
+        chunk_id = metadata_internal.get("chunk_id")
+        chunk_zip_path = metadata_internal.get("chunk_zip_path")
+
+        start = time.perf_counter()
+        image = sample.media.load_image()
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        chunk_cached_after = chunk_cached_before
+        if dataset is not None and chunk_id is not None:
+            downloaded_chunks = getattr(dataset, "_downloaded_chunk_indexes", set())
+            chunk_cached_after = chunk_id in downloaded_chunks
+
+        self._log_tracker_event(
+            "frame_fetch",
+            context=log_context,
+            task_id=task_id,
+            frame_index=sample.frame_index,
+            ar_type=ar_type,
+            wall_ms=round(elapsed_ms, 3),
+        )
+        if metadata is not None:
+            metadata = metadata.copy()
+            cached_before_flag = bool(chunk_cached_before)
+            cached_after_flag = bool(chunk_cached_after)
+            # 2025-11-22: Treat dataset_fetch.download_ms as pure I/O (zip/HTTP)
+            # and reserve decode_ms for explicit CPU decode stages. Under the
+            # current SAM2 tracker pipeline, TaskDataset does not perform eager
+            # JPEG decode, so decode_ms remains 0.0 while download_ms accounts
+            # for chunk reads and lightweight header parsing.
+            download_ms = elapsed_ms
+            decode_ms = 0.0
+            metadata.update(
+                {
+                    "frames": [sample.frame_index],
+                    "cached": cached_before_flag,
+                    "cached_after": cached_after_flag,
+                    "download_ms": round(download_ms, 3),
+                    "decode_ms": round(decode_ms, 3),
+                    "wall_ms": round(elapsed_ms, 3),
+                }
+            )
+            self._log_tracker_event("dataset_fetch", context=log_context, **metadata)
+
+            if (
+                not cached_before_flag
+                and cached_after_flag
+                and chunk_zip_path is not None
+                and chunk_zip_path.exists()
+            ):
+                cost_bytes = chunk_zip_path.stat().st_size
+                self._log_tracker_event(
+                    "dataset_cache",
+                    context=log_context,
+                    event="put",
+                    chunk_id=chunk_id,
+                    cost_bytes=cost_bytes,
+                )
+        return image
+
+    def _build_dataset_fetch_metadata(
+        self,
+        dataset: cvatds.TaskDataset,
+        frame_index: int,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        task_obj = getattr(dataset, "_task", None)
+        chunk_size = getattr(task_obj, "data_chunk_size", None)
+        chunk_id = None
+        cached = None
+        chunk_zip_path = None
+        if isinstance(chunk_size, int) and chunk_size > 0:
+            chunk_id = frame_index // chunk_size
+            downloaded = getattr(dataset, "_downloaded_chunk_indexes", set())
+            cached = chunk_id in downloaded
+            chunk_dir = getattr(dataset, "_chunk_dir", None)
+            if chunk_dir is not None:
+                chunk_zip_path = Path(chunk_dir) / f"{chunk_id}.zip"
+        else:
+            chunk_id = frame_index
+            cached = False
+        loader = getattr(getattr(dataset, "_load_frame_image", None), "__name__", None)
+        chunk_cache_mode = getattr(dataset, "chunk_cache_mode", None)
+        metadata = {
+            "chunk_id": chunk_id,
+            "cached": cached,
+            "chunk_size": chunk_size,
+            "chunk_type": getattr(task_obj, "data_original_chunk_type", None),
+            "chunk_preload_enabled": chunk_cache_mode
+            == cvatds.ChunkCacheMode.PREFETCH_CHUNKS_ONCE,
+            "frame_loader": loader,
+        }
+        internals = {
+            "chunk_cached_before": cached,
+            "chunk_id": chunk_id,
+            "chunk_zip_path": chunk_zip_path,
+        }
+        return metadata, internals
+
     def _calculate_result_for_init_tracking_ar(self, ar_id: str, ar_params) -> dict[str, Any]:
         dataset = self._tracker_datasets.get(
             ar_params["task"],
             allow_chunks=self._tracker_allow_chunk_preload,
         )
         sample, _ = self._get_sample_from_ar_params(ar_params, dataset=dataset)
+        log_context = self._tracker_log_context(ar_id=ar_id, ar_params=ar_params)
 
         def convert_shape(shape: dict) -> cvataa.TrackableShape:
             if shape["type"] not in self._function_spec.supported_shape_types:
@@ -1149,7 +1488,13 @@ class _Agent:
             self._executor.submit(
                 _worker_job_init_tracking,
                 ar_params["task"],
-                sample.media.load_image(),
+                self._load_tracker_image(
+                    sample,
+                    ar_type=ar_params["type"],
+                    task_id=ar_params["task"],
+                    dataset=dataset,
+                    log_context=log_context,
+                ),
                 shapes,
             )
         )
@@ -1161,19 +1506,225 @@ class _Agent:
             ar_params["task"],
             allow_chunks=self._tracker_allow_chunk_preload,
         )
-        sample, _ = self._get_sample_from_ar_params(ar_params, dataset=dataset)
+        frame_indexes = self._tracker_frame_indexes(ar_params)
+        log_context = self._tracker_log_context(ar_id=ar_id, ar_params=ar_params)
 
-        states = ar_params["states"]
-        shapes = self._executor.result(
-            self._executor.submit(
-                _worker_job_track, ar_params["task"], sample.media.load_image(), states
-            )
+        self._prefetch_tracker_chunks(
+            dataset=dataset,
+            frame_indexes=frame_indexes,
+            ar_params=ar_params,
+            log_context=log_context,
         )
 
-        return {
+        states = ar_params["states"]
+        frame_payloads: list[dict[str, Any]] = []
+        frame_latencies_ms: list[float] = []
+        chunk_start = time.perf_counter()
+        use_double_buffer = _TRACKER_DOUBLE_BUFFER and len(frame_indexes) > 1
+        # 2025-11-22: dataset_fetch を track とオーバーラップさせるため、prefetch を優先。
+        # ダブルバッファを使いたい場合は `SAM2_TRACKER_PREFETCH_FRAMES=0` で明示的に切り替える。
+        if _TRACKER_PREFETCH_FRAMES and len(frame_indexes) > 1:
+            # 先行デコードをキューに積み、track 中に次フレームをデコードしてオーバーラップさせる。
+            max_workers = max(2, min(len(frame_indexes), 4))
+
+            def _prepare(frame_idx: int):
+                sample, _ = self._get_sample_from_ar_params(
+                    ar_params,
+                    dataset=dataset,
+                    frame_override=frame_idx,
+                )
+                image = self._load_tracker_image(
+                    sample,
+                    ar_type=ar_params["type"],
+                    task_id=ar_params["task"],
+                    dataset=dataset,
+                    log_context=log_context,
+                )
+                return sample, image
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as prefetch_pool:
+                frame_iter = iter(frame_indexes)
+                first_idx = next(frame_iter)
+                future = prefetch_pool.submit(_prepare, first_idx)
+
+                for next_idx in frame_iter:
+                    frame_start = time.perf_counter()
+                    sample, image = future.result()
+                    future = prefetch_pool.submit(_prepare, next_idx)
+
+                    shapes = self._executor.result(
+                        self._executor.submit(
+                            _worker_job_track,
+                            ar_params["task"],
+                            image,
+                            states,
+                        )
+                    )
+                    frame_payloads.append(
+                        {
+                            "frame": sample.frame_index,
+                            "shapes": [attrs.asdict(shape) if shape else None for shape in shapes],
+                        }
+                    )
+                    frame_latencies_ms.append(round((time.perf_counter() - frame_start) * 1000, 3))
+
+                # last frame
+                frame_start = time.perf_counter()
+                sample, image = future.result()
+                shapes = self._executor.result(
+                    self._executor.submit(
+                        _worker_job_track,
+                        ar_params["task"],
+                        image,
+                        states,
+                    )
+                )
+                frame_payloads.append(
+                    {
+                        "frame": sample.frame_index,
+                        "shapes": [attrs.asdict(shape) if shape else None for shape in shapes],
+                    }
+                )
+                frame_latencies_ms.append(round((time.perf_counter() - frame_start) * 1000, 3))
+        elif use_double_buffer:
+            frames_and_images: list[tuple[int, PIL.Image.Image]] = []
+            for frame_index in frame_indexes:
+                sample, _ = self._get_sample_from_ar_params(
+                    ar_params,
+                    dataset=dataset,
+                    frame_override=frame_index,
+                )
+                image = self._load_tracker_image(
+                    sample,
+                    ar_type=ar_params["type"],
+                    task_id=ar_params["task"],
+                    dataset=dataset,
+                    log_context=log_context,
+                )
+                frames_and_images.append((sample.frame_index, image))
+
+            frame_payloads, frame_latencies_ms = self._executor.result(
+                self._executor.submit(
+                    _worker_job_track_double_buffer,
+                    ar_params["task"],
+                    frames_and_images,
+                    states,
+                )
+            )
+        else:
+            for frame_index in frame_indexes:
+                frame_start = time.perf_counter()
+                sample, _ = self._get_sample_from_ar_params(
+                    ar_params,
+                    dataset=dataset,
+                    frame_override=frame_index,
+                )
+                shapes = self._executor.result(
+                    self._executor.submit(
+                        _worker_job_track,
+                        ar_params["task"],
+                        self._load_tracker_image(
+                            sample,
+                            ar_type=ar_params["type"],
+                            task_id=ar_params["task"],
+                            dataset=dataset,
+                            log_context=log_context,
+                        ),
+                        states,
+                    )
+                )
+                frame_payloads.append(
+                    {
+                        "frame": sample.frame_index,
+                        "shapes": [attrs.asdict(shape) if shape else None for shape in shapes],
+                    }
+                )
+                frame_latencies_ms.append(round((time.perf_counter() - frame_start) * 1000, 3))
+
+        if self._tracker_verbose_logs:
+            frame_loader = getattr(getattr(dataset, "_load_frame_image", None), "__name__", None)
+            self._log_tracker_event(
+                "track_chunk",
+                context=log_context,
+                ar_id=ar_id,
+                task_id=ar_params["task"],
+                job_id=ar_params.get("job"),
+                frame_indexes=frame_indexes,
+                total_frames=len(frame_indexes),
+                frame_latencies_ms=frame_latencies_ms,
+                chunk_preload_enabled=
+                getattr(dataset, "chunk_cache_mode", None)
+                == cvatds.ChunkCacheMode.PREFETCH_CHUNKS_ONCE,
+                double_buffer=use_double_buffer,
+                frame_loader=frame_loader,
+                wall_ms=round((time.perf_counter() - chunk_start) * 1000, 3),
+            )
+
+        result_payload: dict[str, Any] = {
             "states": states,
-            "shapes": [attrs.asdict(shape) if shape else None for shape in shapes],
+            "frames": frame_payloads,
         }
+        if len(frame_payloads) == 1:
+            result_payload["shapes"] = frame_payloads[0]["shapes"]
+        return result_payload
+
+    def _prefetch_tracker_chunks(
+        self,
+        *,
+        dataset: cvatds.TaskDataset,
+        frame_indexes: list[int],
+        ar_params: dict[str, Any],
+        log_context: dict[str, Any],
+    ) -> None:
+        if getattr(dataset, "chunk_cache_mode", None) != cvatds.ChunkCacheMode.PREFETCH_CHUNKS_ONCE:
+            return
+
+        task_obj = getattr(dataset, "_task", None)
+        cache_manager = getattr(dataset, "_cache_manager", None)
+        if task_obj is None or cache_manager is None:
+            return
+
+        chunk_size = getattr(task_obj, "data_chunk_size", None)
+        if not chunk_size:
+            return
+
+        chunk_ids = {frame_index // chunk_size for frame_index in frame_indexes}
+        downloaded: set[int] = getattr(dataset, "_downloaded_chunk_indexes", set())
+        pending = [cid for cid in sorted(chunk_ids) if cid not in downloaded]
+        if not pending:
+            return
+
+        batch_size = ar_params.get("batch_size") or len(frame_indexes)
+        max_workers = (
+            _TRACKER_PREFETCH_PARALLEL if _TRACKER_PREFETCH_PARALLEL > 0 else batch_size * 2
+        )
+        max_workers = max(1, max_workers)
+
+        start = time.perf_counter()
+        self._log_tracker_event(
+            "prefetch",
+            context=log_context,
+            event="start",
+            pending_chunks=len(pending),
+            max_workers=max_workers,
+        )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [
+                pool.submit(cache_manager.ensure_chunk, task_obj, chunk_id) for chunk_id in pending
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+
+        downloaded.update(pending)
+        dataset._downloaded_chunk_indexes = downloaded  # type: ignore[attr-defined]
+        self._log_tracker_event(
+            "prefetch",
+            context=log_context,
+            event="done",
+            pending_chunks=len(pending),
+            wall_ms=round((time.perf_counter() - start) * 1000, 3),
+        )
 
     def _calculate_result_for_interactor_ar(self, ar_id: str, ar_params) -> dict[str, Any]:
         if ar_params["type"] != "interact":
@@ -1211,6 +1762,7 @@ class _Agent:
         *,
         dataset: cvatds.TaskDataset | None = None,
         media_download_policy: cvatds.MediaDownloadPolicy = cvatds.MediaDownloadPolicy.FETCH_FRAMES_ON_DEMAND,
+        frame_override: int | None = None,
     ):
         if dataset is None:
             dataset = cvatds.TaskDataset(
@@ -1220,15 +1772,20 @@ class _Agent:
                 media_download_policy=media_download_policy,
             )
 
-        frame_index = ar_params["frame"]
-
-        # Since ds.samples excludes deleted frames, we can't just do sample = ds.samples[frame_index].
-        # Once we drop Python 3.9, we can change this to use bisect instead of the linear search.
-        for sample in dataset.samples:
-            if sample.frame_index == frame_index:
-                break
+        if frame_override is None:
+            frame_value = ar_params["frame"]
         else:
-            raise _BadArError(f"Frame with index {frame_index} does not exist in the task")
+            frame_value = frame_override
+
+        try:
+            frame_index = int(frame_value)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise _BadArError("Tracking AR is missing frame metadata") from exc
+
+        try:
+            sample = dataset.get_sample_by_frame_index(frame_index)
+        except KeyError as exc:
+            raise _BadArError(f"Frame with index {frame_index} does not exist in the task") from exc
 
         return sample, dataset.labels
 
@@ -1251,6 +1808,7 @@ def run_agent(
     max_tasks_with_chunks: int = 1,
     max_tasks_without_chunks: int = 10,
     tracker_allow_chunk_preload: bool = False,
+    tracker_verbose_logs: bool | None = None,
 ) -> None:
     with (
         _RecoverableExecutor(
@@ -1270,6 +1828,7 @@ def run_agent(
                 max_tasks_with_chunks=max_tasks_with_chunks,
                 max_tasks_without_chunks=max_tasks_without_chunks,
                 tracker_allow_chunk_preload=tracker_allow_chunk_preload,
+                tracker_verbose_logs=tracker_verbose_logs,
             )
         except ApiException as exc:
             raise_if_functions_api_missing(exc, action="Running native function agents")

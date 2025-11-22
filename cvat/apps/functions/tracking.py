@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass
-from typing import Iterable, Literal, Any, Sequence
+from typing import Any, Iterable, Literal, Sequence
 
+from django.conf import settings
 from django.db import transaction
 from django.utils.translation import gettext_lazy as _
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -21,8 +23,55 @@ from .models import (
     AnnotationRequestStatus,
     Function,
 )
+from .run_status import create_tracker_run_status, log_tracker_server_event, register_request_created
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_tracker_batch_size(requested: int | None) -> int:
+    default_size = max(1, getattr(settings, "CVAT_FUNCTION_TRACKER_DEFAULT_BATCH_SIZE", 1))
+    max_size = max(1, getattr(settings, "CVAT_FUNCTION_TRACKER_MAX_BATCH_SIZE", default_size))
+    if requested is None:
+        value = default_size
+    else:
+        value = max(1, int(requested))
+
+    return min(value, max_size)
+
+
+def _split_frame_chunk(pending_frames: list[int], batch_size: int) -> tuple[list[int], list[int]]:
+    if batch_size <= 0:
+        batch_size = 1
+
+    chunk = pending_frames[:batch_size]
+    return chunk, pending_frames[len(chunk) :]
+
+
+def _build_pending_frames(
+    *,
+    frame: int,
+    target_frame: int,
+    requested_frames: Iterable[int] | None,
+) -> list[int]:
+    if requested_frames:
+        normalized: list[int] = [int(value) for value in requested_frames]
+        if len(normalized) < 2:
+            raise ValidationError({"frames": "Frame list must include at least two entries."})
+        if normalized[0] != frame or normalized[-1] != target_frame:
+            raise ValidationError({"frames": "Frame list must span from the start frame to the target frame."})
+        for index in range(1, len(normalized)):
+            current = normalized[index]
+            previous = normalized[index - 1]
+            if current <= previous:
+                raise ValidationError({"frames": "Frame list must be strictly increasing."})
+            if current > target_frame or previous < frame:
+                raise ValidationError({"frames": "Frame list contains values outside the requested range."})
+        if normalized[0] < frame:
+            raise ValidationError({"frames": "Frame list contains values outside the requested range."})
+
+        return normalized[1:]
+
+    return list(range(frame + 1, target_frame + 1))
 
 
 @dataclass(frozen=True)
@@ -220,9 +269,11 @@ def start_tracking_action(
     user,
     frame: int,
     target_frame: int,
+    frames: Iterable[int] | None = None,
     track_ids: Iterable[int] | None = None,
     shapes: Iterable[dict[str, Any]] | None = None,
     conversion_mode: str = "inline",
+    batch_size: int | None = None,
 ) -> dict[str, str]:
     if function.owner_id != user.id:
         raise PermissionDenied("You do not own this function.")
@@ -253,6 +304,7 @@ def start_tracking_action(
         raise ValidationError({"track_ids": "At least one track or shape must be provided."})
 
     tracker_supported_shapes = ",".join(sorted(supported_shapes)) if supported_shapes else None
+    normalized_batch_size = _resolve_tracker_batch_size(batch_size)
 
     with telemetry.traced(
         "functions.tracking.start",
@@ -302,8 +354,13 @@ def start_tracking_action(
                 }
             )
 
-        run_id = str(uuid.uuid4())
-        pending_frames = list(range(frame + 1, target_frame + 1))
+        run_uuid = uuid.uuid4()
+        run_id = str(run_uuid)
+        pending_frames = _build_pending_frames(
+            frame=frame,
+            target_frame=target_frame,
+            requested_frames=frames,
+        )
 
         if not pending_frames:
             raise ValidationError(
@@ -314,6 +371,8 @@ def start_tracking_action(
             span.set_attribute(
                 "cvat.tracker.pending_frames", len(pending_frames)
             )
+            if frames:
+                span.set_attribute("cvat.tracker.frame_override", True)
             if requested_shape_types:
                 span.set_attribute(
                     "cvat.tracker.input_shape_types",
@@ -324,6 +383,13 @@ def start_tracking_action(
             span.set_attribute("cvat.tracker.subject_counts.shape", len(shape_subjects))
 
         with transaction.atomic():
+            run_status = create_tracker_run_status(
+                run_uuid=run_uuid,
+                function=function,
+                job=job,
+                start_frame=frame,
+                target_frame=target_frame,
+            )
             annotation_request = AnnotationRequest.objects.create(
                 function=function,
                 owner=function.owner,
@@ -331,6 +397,7 @@ def start_tracking_action(
                 job=job,
                 category=AnnotationRequestCategory.BATCH,
                 type="init_tracking",
+                run_status=run_status,
                 parameters={
                     "type": "init_tracking",
                     "task": job.segment.task_id,
@@ -343,6 +410,7 @@ def start_tracking_action(
                     "tracking_targets": tracking_targets,
                     "function_run_id": run_id,
                     "conversion_mode": conversion_mode,
+                    "batch_size": normalized_batch_size,
                 },
             )
 
@@ -373,10 +441,16 @@ def _handle_tracking_init_completion(annotation_request: AnnotationRequest) -> N
         )
         return
 
+    batch_size = _resolve_tracker_batch_size(params.get("batch_size"))
+    frame_chunk, remaining_frames = _split_frame_chunk(pending_frames, batch_size)
+    if not frame_chunk:
+        logger.debug("Init tracking request %s could not determine next frame chunk", annotation_request.id)
+        return
+
     _enqueue_track_request(
         template_request=annotation_request,
-        next_frame=pending_frames[0],
-        remaining_frames=pending_frames[1:],
+        frame_chunk=frame_chunk,
+        remaining_frames=remaining_frames,
         states=states,
         params=params,
     )
@@ -398,10 +472,17 @@ def _handle_tracking_track_completion(annotation_request: AnnotationRequest) -> 
         raise ValidationError("State metadata mismatch for tracking run.")
 
     if pending_frames:
+        batch_size = _resolve_tracker_batch_size(params.get("batch_size"))
+        frame_chunk, remaining_frames = _split_frame_chunk(pending_frames, batch_size)
+        if not frame_chunk:
+            logger.debug(
+                "Tracking request %s pending frame chunk is empty", annotation_request.id
+            )
+            return
         _enqueue_track_request(
             template_request=annotation_request,
-            next_frame=pending_frames[0],
-            remaining_frames=pending_frames[1:],
+            frame_chunk=frame_chunk,
+            remaining_frames=remaining_frames,
             states=states,
             params=params,
         )
@@ -412,46 +493,50 @@ def _handle_tracking_track_completion(annotation_request: AnnotationRequest) -> 
 def _enqueue_track_request(
     *,
     template_request: AnnotationRequest,
-    next_frame: int,
+    frame_chunk: list[int],
     remaining_frames: list[int],
     states: list[str],
     params: dict,
 ) -> None:
-    AnnotationRequest.objects.create(
+    if not frame_chunk:
+        return
+
+    track_request = AnnotationRequest.objects.create(
         function=template_request.function,
         owner=template_request.owner,
         task=template_request.task,
         job=template_request.job,
         category=template_request.category,
         type="track",
+        run_status=template_request.run_status,
         parameters={
             "type": "track",
             "task": params["task"],
             "job": params["job"],
-            "frame": next_frame,
+            "frame": frame_chunk[0],
+            "frames": list(frame_chunk),
             "start_frame": params.get("start_frame", params["frame"]),
             "target_frame": params["target_frame"],
             "pending_frames": remaining_frames,
             "tracking_targets": params["tracking_targets"],
             "function_run_id": params["function_run_id"],
             "states": list(states),
+            "batch_size": params.get("batch_size"),
         },
     )
+    register_request_created(track_request)
 
 
 def _apply_tracking_results(annotation_request: AnnotationRequest) -> None:
     params = annotation_request.parameters or {}
-    run_id = params.get("function_run_id")
     tracking_targets = params.get("tracking_targets") or []
     conversion_mode = params.get("conversion_mode", "inline")
-    if not run_id or not tracking_targets:
+    run_uuid = annotation_request.run_status_id
+    if not run_uuid or not tracking_targets:
         logger.debug("Tracking request %s missing run metadata", annotation_request.id)
         return
 
-    try:
-        run_uuid = uuid.UUID(str(run_id))
-    except (TypeError, ValueError):
-        run_uuid = None
+    run_id = str(run_uuid)
 
     start_frame = params.get("start_frame")
     target_frame = params.get("target_frame")
@@ -462,6 +547,7 @@ def _apply_tracking_results(annotation_request: AnnotationRequest) -> None:
         sorted({str(target.get("shape_type")) for target in tracking_targets if target.get("shape_type")})
     )
 
+    apply_started_at = time.perf_counter()
     with telemetry.traced(
         "functions.tracking.apply",
         function_id=annotation_request.function_id,
@@ -474,8 +560,13 @@ def _apply_tracking_results(annotation_request: AnnotationRequest) -> None:
         if span and tracker_shape_types:
             span.set_attribute("cvat.tracker.target_shape_types", tracker_shape_types)
 
+        if not annotation_request.run_status_id:
+            logger.error("Tracking request %s has no run_status FK", annotation_request.id)
+            return
+        run_filter = {"run_status": annotation_request.run_status}
+
         if AnnotationRequest.objects.filter(
-            parameters__function_run_id=str(run_id),
+            **run_filter,
             status=AnnotationRequestStatus.CANCELLED,
         ).exists():
             logger.info("Skipping tracker apply for cancelled run %s", run_id)
@@ -486,7 +577,7 @@ def _apply_tracking_results(annotation_request: AnnotationRequest) -> None:
                 function=annotation_request.function,
                 type="track",
                 status=AnnotationRequestStatus.DONE,
-                parameters__function_run_id=run_id,
+                **run_filter,
             ).order_by("parameters__frame")
         )
 
@@ -496,8 +587,44 @@ def _apply_tracking_results(annotation_request: AnnotationRequest) -> None:
 
         frames_to_shapes: dict[int, list | None] = {}
         for req in track_requests:
-            frame_number = req.parameters.get("frame")
-            frames_to_shapes[frame_number] = (req.result or {}).get("shapes")
+            params = req.parameters or {}
+            result_payload = req.result or {}
+            chunk_frames = params.get("frames")
+            if isinstance(chunk_frames, list) and chunk_frames:
+                chunk_map: dict[int, list | None] = {}
+                frame_results = result_payload.get("frames")
+                if isinstance(frame_results, list):
+                    for entry in frame_results:
+                        if not isinstance(entry, dict):
+                            continue
+                        try:
+                            frame_value = int(entry.get("frame"))
+                        except (TypeError, ValueError):
+                            continue
+                        chunk_map[frame_value] = entry.get("shapes")
+
+                fallback_shapes = result_payload.get("shapes")
+                for raw_value in chunk_frames:
+                    try:
+                        frame_number = int(raw_value)
+                    except (TypeError, ValueError):
+                        continue
+
+                    if frame_number in chunk_map:
+                        frames_to_shapes[frame_number] = chunk_map[frame_number]
+                    elif frame_number == params.get("frame"):
+                        frames_to_shapes[frame_number] = fallback_shapes
+                    else:
+                        frames_to_shapes.setdefault(frame_number, None)
+            else:
+                frame_number = params.get("frame")
+                if frame_number is None:
+                    continue
+                try:
+                    frame_key = int(frame_number)
+                except (TypeError, ValueError):
+                    continue
+                frames_to_shapes[frame_key] = result_payload.get("shapes")
 
         if span:
             span.set_attribute("cvat.tracker.completed_track_requests", len(track_requests))
@@ -508,6 +635,7 @@ def _apply_tracking_results(annotation_request: AnnotationRequest) -> None:
         updated_tracks: list[dict] = []
         deleted_shapes: list[dict] = []
 
+        db_started_at = time.perf_counter()
         with transaction.atomic():
             for target_index, target in enumerate(tracking_targets):
                 subject_kind = target.get("kind", "track")
@@ -668,6 +796,7 @@ def _apply_tracking_results(annotation_request: AnnotationRequest) -> None:
                     updated_tracks.append(track_payload)
 
             job.touch()
+        db_wall_ms = (time.perf_counter() - db_started_at) * 1000.0
 
         if span:
             span.set_attribute("cvat.tracker.created_tracks", len(created_tracks))
@@ -679,6 +808,21 @@ def _apply_tracking_results(annotation_request: AnnotationRequest) -> None:
             handle_annotations_change(job, {"tracks": created_tracks}, "create")
         if deleted_shapes:
             handle_annotations_change(job, {"shapes": deleted_shapes}, "delete")
+
+    total_wall_ms = (time.perf_counter() - apply_started_at) * 1000.0
+    log_tracker_server_event(
+        "apply_results",
+        annotation_request=annotation_request,
+        summary=annotation_request.run_status,
+        payload={
+            "wall_ms": round(total_wall_ms, 3),
+            "db_wall_ms": round(db_wall_ms, 3),
+            "track_request_count": len(track_requests),
+            "created_tracks": len(created_tracks),
+            "updated_tracks": len(updated_tracks),
+            "deleted_shapes": len(deleted_shapes),
+        },
+    )
 
 
 def rollback_tracking_run(run_id: str) -> None:

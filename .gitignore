@@ -80,3 +80,11 @@ cvat-ui/dist
 **/!.yarn/releases
 **/!.yarn/sdks
 **/!.yarn/versions
+
+*.jpeg
+*.jpg
+*.png
+*.json
+*.mp4
+*.zip
+tmp

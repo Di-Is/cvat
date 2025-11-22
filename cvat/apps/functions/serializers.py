@@ -37,6 +37,7 @@ class FunctionSerializer(serializers.ModelSerializer):
     help_message = serializers.CharField(required=False, allow_blank=True)
     animated_gif = serializers.CharField(required=False, allow_blank=True)
     version = serializers.IntegerField(min_value=1, required=False)
+    supports_batched_tracker = serializers.BooleanField(required=False)
 
     class Meta:
         model = Function
@@ -54,6 +55,7 @@ class FunctionSerializer(serializers.ModelSerializer):
             "help_message",
             "animated_gif",
             "version",
+            "supports_batched_tracker",
             "labels_v2",
             "created_at",
             "updated_at",
@@ -185,6 +187,14 @@ class TrackingActionRequestSerializer(serializers.Serializer):
     frame = serializers.IntegerField(min_value=0)
     target_frame = serializers.IntegerField(min_value=0)
     conversion_mode = serializers.ChoiceField(choices=["inline", "preconvert"], default="inline")
+    batch_size = serializers.IntegerField(min_value=1, required=False, allow_null=True, default=None)
+    frames = serializers.ListField(
+        child=serializers.IntegerField(min_value=0),
+        allow_empty=False,
+        allow_null=True,
+        required=False,
+        default=None,
+    )
     track_ids = serializers.ListField(
         child=serializers.IntegerField(min_value=1),
         allow_empty=True,
@@ -198,6 +208,12 @@ class TrackingActionRequestSerializer(serializers.Serializer):
         default=list,
     )
 
+    def _supports_batched_tracker(self) -> bool:
+        function = self.context.get("function")
+        if function is None:
+            return False
+        return bool(getattr(function, "supports_batched_tracker", False))
+
     def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
         frame = attrs["frame"]
         target_frame = attrs["target_frame"]
@@ -205,6 +221,8 @@ class TrackingActionRequestSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {"target_frame": "Target frame must be greater than the start frame."}
             )
+
+        supports_batched_tracker = self._supports_batched_tracker()
 
         track_ids = attrs["track_ids"]
         if len(track_ids) != len(set(track_ids)):
@@ -226,6 +244,45 @@ class TrackingActionRequestSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {"track_ids": "At least one track or shape must be provided for tracking."}
             )
+
+        batch_size = attrs.get("batch_size")
+        frame_list = attrs.get("frames")
+        if not supports_batched_tracker:
+            if batch_size not in (None, 1):
+                raise serializers.ValidationError(
+                    {"batch_size": "Batch tracking is not supported by this function."}
+                )
+            if frame_list:
+                raise serializers.ValidationError(
+                    {"frames": "Explicit frame lists are not supported by this function."}
+                )
+
+        if frame_list:
+            if len(frame_list) < 2:
+                raise serializers.ValidationError(
+                    {"frames": "Frame list must include at least two entries."}
+                )
+            if frame_list[0] != frame:
+                raise serializers.ValidationError(
+                    {"frames": "Frame list must start with the requested frame."}
+                )
+            if frame_list[-1] != target_frame:
+                raise serializers.ValidationError(
+                    {"frames": "Frame list must end with the target frame."}
+                )
+            if len(frame_list) != len(set(frame_list)):
+                raise serializers.ValidationError(
+                    {"frames": "Frame list must not contain duplicates."}
+                )
+            if any(value < frame or value > target_frame for value in frame_list):
+                raise serializers.ValidationError(
+                    {"frames": "Frame list contains values outside the requested range."}
+                )
+            for prev, current in zip(frame_list, frame_list[1:]):
+                if current <= prev:
+                    raise serializers.ValidationError(
+                        {"frames": "Frame list must be strictly increasing."}
+                    )
 
         return attrs
 

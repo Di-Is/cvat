@@ -418,6 +418,8 @@ and specify them in the command line.
 
 For detailed SAM2 setup instructions, see the
 {{< ilink "/docs/annotation/auto-annotation/segment-anything-2-tracker" "SAM2 Tracker documentation" >}}.
+Tracker agents also support `--tracker-preload-chunks` to reuse dataset chunks and
+`--include-fetch-metrics` to emit verbose dataset fetch telemetry for benchmarking runs.
 
 ### Delete
 

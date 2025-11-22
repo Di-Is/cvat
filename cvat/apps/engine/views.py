@@ -2176,13 +2176,18 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
     )
     def tracker_actions(self, request: ExtendedRequest, pk: int, function_id: str):
         job = self.get_object()
-        serializer = TrackingActionRequestSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
         try:
             function = Function.objects.get(pk=int(function_id))
         except (ValueError, Function.DoesNotExist) as exc:
             raise ValidationError(detail={"function_id": "Function not found."}) from exc
+
+        serializer = TrackingActionRequestSerializer(
+            data=request.data,
+            context={
+                "function": function,
+            },
+        )
+        serializer.is_valid(raise_exception=True)
 
         result = start_tracking_action(
             job=job,

@@ -1,0 +1,46 @@
+[tools]
+lefthook = "latest"
+typos = "latest"
+
+[vars]
+OUTPUT_COMPOSE_FILE = ".devcontainer/compose.yml"
+
+[env]
+_.file = { path = ".env" }
+UV_CACHE_DIR = ".uv_cache"
+UV_PYTHON_INSTALL_DIR = ".uv_python"
+
+# devcontainer initialize command task
+[tasks.dc-init]
+run = ["mise run dc-init-001_generate_compose"]
+description = "Initialize command for devcontainer"
+
+[tasks.dc-init-001_generate_compose]
+description = "Generate compose.yml for devcontainer"
+run = '.devcontainer/scripts/i_generate_compose.sh --verbose --output .devcontainer/compose.yml .devcontainer/compose/base/compose.yml .devcontainer/compose/extend'
+
+# devcontainer post_create command task
+[tasks.dc-post_create-001_install_pre_commit_hook]
+description = "Install pre-commit hook"
+run = ""
+
+[tasks.dc-post_create]
+run = ["mise run dc-post_create-001_install_pre_commit_hook"]
+description = "Post create command for devcontainer"
+
+# static-analysis
+[tasks.check-lint]
+[tasks.check-format]
+[tasks.check-type]
+[tasks.check-typo]
+run = "typos"
+
+# static-analysis fix
+[tasks.fix-lint]
+[tasks.fix-format]
+[tasks.fix-type]
+[tasks.fix-typo]
+run = "typos -w"
+
+# test
+[tasks.test-unit]

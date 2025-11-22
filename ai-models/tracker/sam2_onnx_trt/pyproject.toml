@@ -1,0 +1,35 @@
+[project]
+name = "cvat-sam2-agents"
+version = "0.1.0"
+description = "Shared dependencies for SAM2 tracker and interactor CVAT agents"
+readme = "README.md"
+authors = [{ name = "CVAT.ai", email = "support@cvat.ai" }]
+requires-python = "~=3.12.0"
+dependencies = [
+    "huggingface-hub>=1.1.4",
+    "opencv-python-headless>=4.12.0.88",
+    "sam-2",
+    "torch~=2.9.1",
+    "onnx==1.16.2",
+    "tensorrt-cu12==10.12.0.36",
+    "tensorrt-cu12-libs",
+    "onnxscript>=0.5.6",
+    "onnxruntime-gpu>=1.23.2",
+    "onnxconverter-common>=1.16.0",
+]
+
+[tool.uv.sources]
+tensorrt-cu12 = { index = "nvidia" }
+tensorrt-cu12-libs = { index = "nvidia" }
+sam-2 = { path = "external/sam2", editable = true }
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com"
+explicit = true
+
+[tool.uv.extra-build-dependencies]
+sam-2 = [{ requirement = "torch", match-runtime = true }]
+
+[tool.uv.extra-build-variables]
+sam-2 = { SAM2_BUILD_ALLOW_ERRORS = "0", TORCH_CUDA_ARCH_LIST = "8.9" }

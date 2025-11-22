@@ -229,3 +229,23 @@ class TestTaskDataset:
             assert actual_image == expected_image
 
             assert sample.annotations is None
+
+    def test_chunk_cache_mode_prefetch(self):
+        dataset = cvatds.TaskDataset(
+            self.client,
+            self.task.id,
+            load_annotations=False,
+            chunk_cache_mode=cvatds.ChunkCacheMode.PREFETCH_CHUNKS_ONCE,
+        )
+
+        assert dataset.chunk_cache_mode == cvatds.ChunkCacheMode.PREFETCH_CHUNKS_ONCE
+
+    def test_chunk_cache_mode_fetch_on_demand(self):
+        dataset = cvatds.TaskDataset(
+            self.client,
+            self.task.id,
+            load_annotations=False,
+            chunk_cache_mode=cvatds.ChunkCacheMode.FETCH_ON_DEMAND,
+        )
+
+        assert dataset.chunk_cache_mode == cvatds.ChunkCacheMode.FETCH_ON_DEMAND

@@ -30,9 +30,11 @@ The following subcommands are supported:
 ### Tracker agents
 
 `cvat-cli function run-agent` accepts tracker-specific cache tuning flags.  
-`--tracker-preload-chunks` downloads image chunks for each task before SAM2
-tracking, drastically reducing per-frame latency when the task uses image sets.
-Combine it with `--max-cache-tasks-with-chunks` / `--max-cache-tasks-without-chunks`
+`--tracker-preload-chunks` downloads each image chunk once (when first needed)
+before SAM2 tracking continues, drastically reducing per-frame latency when the task uses image sets.
+`--include-fetch-metrics` forces verbose dataset fetch logging so benchmarking scripts can
+inspect chunk download/caching behavior.
+Combine these with `--max-cache-tasks-with-chunks` / `--max-cache-tasks-without-chunks`
 to bound disk usage while still taking advantage of shared `TaskDataset` caches.
 
 ## Installation

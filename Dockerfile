@@ -171,6 +171,9 @@ RUN --mount=type=bind,from=build-image,source=/tmp/wheelhouse,target=/mnt/wheelh
     --mount=type=bind,from=build-image-av,source=/tmp/wheelhouse,target=/mnt/wheelhouse-av \
     python -m pip install --no-index /mnt/wheelhouse/*.whl /mnt/wheelhouse-av/*.whl
 
+# Install tooling needed for in-container diagnostics/tests before removing pip.
+RUN python -m pip install --no-cache-dir pytest pytest-timeout pytest-cases uv
+
 ENV NUMPROCS=1
 COPY --from=build-image-av /opt/ffmpeg/lib /usr/lib
 

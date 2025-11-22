@@ -8,6 +8,7 @@ from django.utils import timezone
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 
 from .models import AnnotationRequest, AnnotationRequestStatus, Function
+from .run_status import log_tracker_server_event, register_request_running
 
 QUEUE_PREFIX = "function"
 QUEUE_DELIMITER = ":"
@@ -53,6 +54,7 @@ def acquire_annotation_request(
     category: str,
 ) -> AnnotationRequest | None:
     with transaction.atomic():
+        acquired_at = timezone.now()
         query = (
             AnnotationRequest.objects.select_for_update(skip_locked=True)
             .filter(
@@ -67,11 +69,18 @@ def acquire_annotation_request(
         if not annotation_request:
             return None
 
+        queue_wait_ms = (acquired_at - annotation_request.created_at).total_seconds() * 1000.0
         annotation_request.status = AnnotationRequestStatus.RUNNING
         annotation_request.agent_id = agent_id
         annotation_request.progress = 0.0
-        annotation_request.updated_at = timezone.now()
+        annotation_request.updated_at = acquired_at
         annotation_request.save(update_fields=["status", "agent_id", "progress", "updated_at"])
+        register_request_running(annotation_request)
+        log_tracker_server_event(
+            "queue_acquire",
+            annotation_request=annotation_request,
+            payload={"queue_wait_ms": round(queue_wait_ms, 3)},
+        )
         return annotation_request
 
 
